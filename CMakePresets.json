@@ -1,0 +1,41 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "vcpkg-arm64",
+            "displayName": "macOS arm64 + vcpkg",
+            "generator": "Ninja",
+            "binaryDir": "build",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "arm64-osx",
+                "CMAKE_CXX_STANDARD": "20",
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "vcpkg-arm64-debug",
+            "displayName": "macOS arm64 + vcpkg debug",
+            "generator": "Ninja",
+            "binaryDir": "build_debug",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "arm64-osx",
+                "CMAKE_CXX_STANDARD": "20",
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "vcpkg-arm64",
+            "configurePreset": "vcpkg-arm64",
+            "jobs": 0
+        },
+        {
+            "name": "vcpkg-arm64-debug",
+            "configurePreset": "vcpkg-arm64-debug",
+            "jobs": 0
+        }
+    ]
+}
