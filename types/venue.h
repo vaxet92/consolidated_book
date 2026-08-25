@@ -8,39 +8,39 @@ enum class InstrumentId : int8_t {
     SOLUSDT = 2,
 };
 
-enum class Exchange : int8_t {
-    UNKNOWN = -1,
+enum class VenueId : size_t {
     BINANCE = 0,
     BYBIT = 1,
     OKX = 2,
+    COUNT = 3,
 };
 
-class ExchangeConverter {
+class VenueConverter {
    public:
-    ExchangeConverter() = delete;
+    VenueConverter() = delete;
 
-    static inline std::string ToExchangeString(Exchange exchange) {
-        switch (exchange) {
-            case Exchange::BINANCE:
+    static inline std::string ToVenueString(VenueId venue_id) {
+        switch (venue_id) {
+            case VenueId::BINANCE:
                 return "BINANCE";
-            case Exchange::BYBIT:
+            case VenueId::BYBIT:
                 return "BYBIT";
-            case Exchange::OKX:
+            case VenueId::OKX:
                 return "OKX";
             default:
                 return "UNKNOWN";
         }
     }
 
-    static inline Exchange ToExchange(const std::string& exchange) {
-        if (exchange == "BINANCE") {
-            return Exchange::BINANCE;
-        } else if (exchange == "BYBIT") {
-            return Exchange::BYBIT;
-        } else if (exchange == "OKX") {
-            return Exchange::OKX;
+    static inline VenueId ToVenueId(const std::string& venue_id) {
+        if (venue_id == "BINANCE") {
+            return VenueId::BINANCE;
+        } else if (venue_id == "BYBIT") {
+            return VenueId::BYBIT;
+        } else if (venue_id == "OKX") {
+            return VenueId::OKX;
         }
-        return Exchange::UNKNOWN;
+        return VenueId::COUNT;
     }
 
     static inline std::string ToInstrumentString(InstrumentId instrument_id) {

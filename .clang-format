@@ -10,6 +10,7 @@ ColumnLimit: 120             # Set a wider line width (default for Google is 80)
 
 # Additional Google style settings
 AllowShortFunctionsOnASingleLine: Inline # Allow short functions on a single line if possible
+AllowShortEnumsOnASingleLine: false      # Keep each enumerator on its own line
 ConstructorInitializerAllOnOneLineOrOnePerLine: true # Constructor initializers either all on one line or one per line
 DerivePointerAlignment: false            # Do not infer pointer alignment from code
 PointerAlignment: Left                   # Align pointer symbols to the left of the type

@@ -12,43 +12,42 @@
 #include <string>
 
 struct ProviderConfig {
-    std::string> exchange_names;
+    std::string > exchange_names;
     std::string exchange_endpoint;
     std::vector<std::string> instruments;
     MessagePipeManager* pipe_manager;
     uint32_t candle_timeframe_ms;
 };
 
-    class BaseProvider {
-public:
-    explicit BaseProvider(const ProviderConfig& config);
-    virtual ~BaseProvider();
-    
+class MDProvider {
+   public:
+    explicit MDProvider(const ProviderConfig& config);
+    virtual ~MDProvider();
+
     // Start the provider (in a separate thread)
     void Start();
     // Stop the provider
     void Stop();
-    
-protected:
+
+   protected:
     // Pure virtual: child classes must implement message parsing
     virtual void OnMessage(const std::string& message) = 0;
-    
+
     // Pure virtual: child classes must provide subscription message
     virtual std::string SubscriptionMessage() const = 0;
     virtual std::string UnsubscriptionMessage() const = 0;
-    
+
     // Get current timestamp in milliseconds
     static int64_t GetCurrentTimeMs();
-    
+
     const ProviderConfig config;
     std::atomic<bool> running;
-    
-private:
-    
+
+   private:
     static constexpr uint32_t MAX_RECONNECT_ATTEMPTS = 10;
     static constexpr uint64_t INITIAL_RECONNECT_DELAY_MS = 1000;  // 1 second
     static constexpr uint64_t MAX_RECONNECT_DELAY_MS = 60000;     // 60 seconds
-    
+
     std::thread worker_thread;
     net::io_context ioc;
     ssl::context ssl_ctx;

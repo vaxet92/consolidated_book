@@ -17,8 +17,10 @@ option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_SERVER "Build server app" ON)
 
 add_subdirectory(types)
-add_subdirectory(utils)
-add_subdirectory(candle_manager)
+add_subdirectory(logger)
+add_subdirectory(md_core)
+add_subdirectory(md_provider)
+
 
 if (BUILD_SERVER)
   add_subdirectory(server)
