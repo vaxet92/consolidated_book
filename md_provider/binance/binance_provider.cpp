@@ -1,131 +1,118 @@
 #include "binance_provider.h"
-#include <iostream>
+#include "decimal.h"
+#include "logger/logger.h"
+#include "types/venue.h"
 #include <simdjson.h>
+#include <algorithm>
+#include <cctype>
 
 using namespace simdjson;
+using namespace market_data;
 
-BinanceProvider::BinanceProvider(const ProviderConfig& config) : BaseProvider(config) {}
+namespace {
 
-const char* BinanceProvider::GetHost() const {
-    return BINANCE_HOST;
+std::string ToLowerSymbol(InstrumentId instrument) {
+    std::string symbol = VenueConverter::ToInstrumentString(instrument);
+    std::transform(symbol.begin(), symbol.end(), symbol.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return symbol;
 }
 
-const char* BinanceProvider::GetPort() const {
-    return BINANCE_PORT;
-}
+void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
+    for (auto level : levels) {
+        auto pair = level.get_array();
+        auto it = pair.begin();
+        std::string_view price_sv = (*it).get_string();
+        ++it;
+        std::string_view qty_sv = (*it).get_string();
 
-const char* BinanceProvider::GetPath() const {
-    // Path will be set after subscription
-    // For now, return a generic stream endpoint
-    return "/ws";
-}
-
-std::string BinanceProvider::GetSubscriptionMessage() const {
-    // Build subscription message for all instruments
-    // Format: {"method":"SUBSCRIBE","params":["btcusdt@trade","ethusdt@trade"],"id":1}
-
-    std::ostringstream oss;
-    oss << "{\"method\":\"SUBSCRIBE\",\"params\":[";
-
-    for (size_t i = 0; i < config.instruments.size(); ++i) {
-        if (i > 0) oss << ",";
-
-        // Convert to lowercase (Binance requirement)
-        std::string instrument_lower = config.instruments[i];
-        for (char& c : instrument_lower) {
-            c = std::tolower(c);
-        }
-
-        oss << "\"" << instrument_lower << "@trade\"";
+        PriceLevel level_out;
+        level_out.price = ParseScaledDecimal(price_sv);
+        level_out.qty = ParseScaledDecimal(qty_sv);
+        out.push_back(level_out);
     }
-
-    oss << "],\"id\":1}";
-
-    return oss.str();
 }
 
-void BinanceProvider::OnMessage(const std::string& message) {
-    ParseTrade(message);
+}  // namespace
+
+BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback)
+    : Provider(config, std::move(callback)) {
+    std::string symbol = ToLowerSymbol(config.instrument);
+    depth_path_ = "/ws/" + symbol + "@depth@100ms";
+    bbo_path_ = "/ws/" + symbol + "@bookTicker";
 }
 
-void BinanceProvider::ParseTrade(const std::string& message) {
+void BinanceProvider::OnBboMessage(const std::string& message) {
+    // TODO: fast-BBO correctness oracle (DESIGN_1 §4.4) still not implemented -
+    // this only parses and logs the stream so it's visible end-to-end.
+    // Comparing against the depth-derived BBO and triggering a resync on
+    // disagreement is a separate step (needs provider access to the book).
     try {
         ondemand::parser parser;
-        padded_string json = padded_string(message);
+        padded_string json(message);
         ondemand::document doc = parser.iterate(json);
 
-        // Check if this is a trade event
-        std::string_view event_type;
-        auto event_result = doc["e"].get_string();
-        if (event_result.error()) {
-            // Not a trade message, might be subscription confirmation
-            return;
-        }
-        event_type = event_result.value();
+        auto bid_price_result = doc["b"].get_string();
+        auto bid_qty_result = doc["B"].get_string();
+        auto ask_price_result = doc["a"].get_string();
+        auto ask_qty_result = doc["A"].get_string();
 
-        if (event_type != "trade") {
-            return;
+        if (bid_price_result.error() || bid_qty_result.error() || ask_price_result.error() || ask_qty_result.error()) {
+            return;  // not a bookTicker payload (e.g. a subscribe ack)
         }
 
-        // Extract trade data
-        Trade trade;
-        trade.exchange = "BINANCE";
+        PriceTicks bid_price = ParseScaledDecimal(bid_price_result.value());
+        QtyUnits bid_qty = ParseScaledDecimal(bid_qty_result.value());
+        PriceTicks ask_price = ParseScaledDecimal(ask_price_result.value());
+        QtyUnits ask_qty = ParseScaledDecimal(ask_qty_result.value());
 
-        // Instrument symbol
-        auto symbol_result = doc["s"].get_string();
-        if (!symbol_result.error()) {
-            std::string symbol(symbol_result.value());
-            // Convert to uppercase
-            for (char& c : symbol) {
-                c = std::toupper(c);
-            }
-            trade.instrument = symbol;
-        }
-
-        // Trade ID
-        auto trade_id_result = doc["t"].get_int64();
-        if (!trade_id_result.error()) {
-            trade.trade_id = std::to_string(trade_id_result.value());
-        }
-
-        // Price
-        auto price_result = doc["p"].get_string();
-        if (!price_result.error()) {
-            trade.price = std::stod(std::string(price_result.value()));
-        }
-
-        // Quantity
-        auto qty_result = doc["q"].get_string();
-        if (!qty_result.error()) {
-            trade.qty = std::stod(std::string(qty_result.value()));
-        }
-
-        // Exchange timestamp (T field in milliseconds)
-        auto ts_result = doc["T"].get_int64();
-        if (!ts_result.error()) {
-            trade.ts_exchange_ms = ts_result.value();
-        }
-
-        // Local receive timestamp
-        trade.ts_recv_ms = GetCurrentTimeMs();
-
-        // Push trade to the pipeline
-        PushTrade(std::move(trade));
+        Logger::Log(LogLevel::kInfo, "[BINANCE] BBO bid={}/{} ask={}/{}", bid_price, bid_qty, ask_price, ask_qty);
 
     } catch (const simdjson_error& e) {
-        std::cerr << "[BINANCE] JSON parse error: " << e.what() << std::endl;
-    } catch (const std::exception& e) {
-        std::cerr << "[BINANCE] Error parsing trade: " << e.what() << std::endl;
+        Logger::Log(LogLevel::kError, "[BINANCE] BBO JSON parse error: {}", e.what());
     }
 }
 
-class BinanceMessageParser {
-   public:
-    explicit BinanceMessageParser();
-    ~BinanceMessageParser() = default;
+void BinanceProvider::OnDepthMessage(const std::string& message) {
+    try {
+        ondemand::parser parser;
+        padded_string json(message);
+        ondemand::document doc = parser.iterate(json);
 
-    static Trade ParseTrade(std::string&& message);
+        auto event_type_result = doc["e"].get_string();
+        if (event_type_result.error() || event_type_result.value() != "depthUpdate") {
+            return;  // not a depth update (e.g. a control/ack message)
+        }
 
-   private:
-    static Trade ParseTrade(const std::string& message);
-};
+        BookUpdate update{};
+        update.venue = config.venue_id;
+        update.instrument = config.instrument;
+        // TODO: gap detection/resync (DESIGN_1 §4.2) not implemented yet -
+        // every message is applied as a plain delta, snapshot sync (REST
+        // /api/v3/depth) is not done. A missed or out-of-order message will
+        // silently desync this book until that state machine is built.
+        update.is_snapshot = false;
+
+        update.recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+
+        auto event_ts_result = doc["E"].get_int64();
+        update.exch_ts_ns = event_ts_result.error() ? 0 : event_ts_result.value() * 1'000'000;
+
+        auto final_id_result = doc["u"].get_uint64();
+        update.seq = final_id_result.error() ? 0 : final_id_result.value();
+
+        auto bids_result = doc["b"].get_array();
+        if (!bids_result.error()) {
+            AppendLevels(bids_result.value(), update.bids);
+        }
+        auto asks_result = doc["a"].get_array();
+        if (!asks_result.error()) {
+            AppendLevels(asks_result.value(), update.asks);
+        }
+
+        Emit(update);
+
+    } catch (const simdjson_error& e) {
+        Logger::Log(LogLevel::kError, "[BINANCE] JSON parse error: {}", e.what());
+    }
+}

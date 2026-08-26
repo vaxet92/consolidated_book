@@ -2,6 +2,8 @@
 
 #include "venue_book.h"
 
+using namespace market_data;
+
 namespace {
 
 BookUpdate MakeUpdate(uint64_t seq, bool is_snapshot, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {

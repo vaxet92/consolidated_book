@@ -1,38 +1,46 @@
 #include "md_provider.h"
-#include <iostream>
-#include <thread>
+#include "logger/logger.h"
 #include <root_certificates.hpp>
 
-MDProvider::MDProvider(const ProviderConfig& config)
-    : config(config), running(false), ssl_ctx(ssl::context::tlsv12_client), reconnect_count(0) {
+using namespace market_data;
+
+Provider::Provider(const ProviderConfig& config, CallBack callback)
+    : config(config),
+      running(false),
+      ssl_ctx(ssl::context::tlsv12_client),
+      reconnect_count(0),
+      callback_(std::move(callback)) {
     // Load root certificates for SSL
     load_root_certificates(ssl_ctx);
     ssl_ctx.set_verify_mode(ssl::verify_peer);
 }
 
-MDProvider::~MDProvider() {
+Provider::~Provider() {
     Stop();
 }
 
-void MDProvider::Start() {
+void Provider::Start() {
     if (running.exchange(true)) {
         return;  // Already running
     }
 
-    std::cout << "[" << config.exchange_name << "] Starting provider..." << std::endl;
+    Logger::Log(LogLevel::kInfo, "[{}] Starting provider...", VenueConverter::ToVenueString(config.venue_id));
 
     worker_thread = std::thread([this]() { this->Run(); });
 }
 
-void MDProvider::Stop() {
+void Provider::Stop() {
     if (!running.exchange(false)) {
         return;  // Already stopped
     }
 
-    std::cout << "[" << config.exchange_name << "] Stopping provider..." << std::endl;
+    Logger::Log(LogLevel::kInfo, "[{}] Stopping provider...", VenueConverter::ToVenueString(config.venue_id));
 
-    if (ws_session) {
-        ws_session->Stop();
+    if (depth_session_) {
+        depth_session_->Stop();
+    }
+    if (bbo_session_) {
+        bbo_session_->Stop();
     }
 
     ioc.stop();
@@ -42,22 +50,27 @@ void MDProvider::Stop() {
     }
 }
 
-void MDProvider::Run() {
+void Provider::Run() {
     while (running) {
         try {
             // Reset io_context for a new run
             ioc.restart();
 
-            // Create WebSocket session
-            ws_session = std::make_shared<WebSocketSessionSSL>(
-                ioc, ssl_ctx, [this](const std::string& msg) { this->OnMessage(msg); });
+            // Depth session: the real book.
+            depth_session_ = std::make_shared<WebSocketSessionSSL>(
+                ioc, ssl_ctx, [this](const std::string& msg) { this->OnDepthMessage(msg); });
 
-            std::cout << "[" << config.exchange_name << "] Connecting to " << GetHost() << "..." << std::endl;
+            // Fast-BBO session: correctness oracle only (§4.4).
+            bbo_session_ = std::make_shared<WebSocketSessionSSL>(
+                ioc, ssl_ctx, [this](const std::string& msg) { this->OnBboMessage(msg); });
 
-            // Start the WebSocket connection
-            ws_session->Run(GetHost(), GetPort(), GetPath());
+            Logger::Log(LogLevel::kInfo, "[{}] Connecting to {}...", VenueConverter::ToVenueString(config.venue_id),
+                        GetHost());
 
-            // Run the io_context
+            depth_session_->Run(GetHost(), GetPort(), GetDepthPath());
+            bbo_session_->Run(GetHost(), GetPort(), GetBboPath());
+
+            // Run the io_context - drives both sessions on this one thread.
             ioc.run();
 
             if (running) {
@@ -66,7 +79,7 @@ void MDProvider::Run() {
             }
 
         } catch (const std::exception& e) {
-            std::cerr << "[" << config.exchange_name << "] Error: " << e.what() << std::endl;
+            Logger::Log(LogLevel::kError, "[{}] Error: {}", VenueConverter::ToVenueString(config.venue_id), e.what());
 
             if (running) {
                 HandleReconnection();
@@ -74,16 +87,15 @@ void MDProvider::Run() {
         }
     }
 
-    std::cout << "[" << config.exchange_name << "] Provider stopped" << std::endl;
+    Logger::Log(LogLevel::kInfo, "[{}] Provider stopped", VenueConverter::ToVenueString(config.venue_id));
 }
 
-void MDProvider::HandleReconnection() {
+void Provider::HandleReconnection() {
     if (!running) return;
 
-    reconnect_count++;
-
-    if (reconnect_count > MAX_RECONNECT_ATTEMPTS) {
-        std::cerr << "[" << config.exchange_name << "] Max reconnect attempts reached. Stopping." << std::endl;
+    if (++reconnect_count > MAX_RECONNECT_ATTEMPTS) {
+        Logger::Log(LogLevel::kError, "[{}] Max reconnect attempts reached. Stopping.",
+                    VenueConverter::ToVenueString(config.venue_id));
         running = false;
         return;
     }
@@ -91,21 +103,19 @@ void MDProvider::HandleReconnection() {
     // Exponential backoff with cap
     uint64_t delay_ms = std::min(INITIAL_RECONNECT_DELAY_MS * (1ULL << (reconnect_count - 1)), MAX_RECONNECT_DELAY_MS);
 
-    std::cout << "[" << config.exchange_name << "] Reconnecting in " << delay_ms << "ms (attempt " << reconnect_count
-              << ")" << std::endl;
+    Logger::Log(LogLevel::kWarning, "[{}] Reconnecting in {}ms (attempt {})",
+                VenueConverter::ToVenueString(config.venue_id), delay_ms, reconnect_count);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 }
 
-void MDProvider::PushTrade(Trade&& trade) {
-    if (config.pipe_manager) {
-        if (!config.pipe_manager->PushTrade(std::move(trade))) {
-            std::cerr << "[" << config.exchange_name << "] Warning: Trade dropped (queue full)" << std::endl;
-        }
+void Provider::Emit(const BookUpdate& update) {
+    if (callback_) {
+        callback_(update);
     }
 }
 
-int64_t MDProvider::GetCurrentTimeMs() {
+int64_t Provider::GetCurrentTimeMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
         .count();
 }

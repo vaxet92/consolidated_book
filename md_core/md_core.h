@@ -5,22 +5,24 @@
 #include "types.h"
 #include "logger/logger.h"
 
+namespace market_data {
+
 using VenueBookArray = std::array<std::unique_ptr<VenueBook>, static_cast<size_t>(VenueId::COUNT)>;
 using InstrumentBooks = std::unordered_map<InstrumentId, VenueBookArray>;
 
-class MDCore {
+class Core {
    public:
-    MDCore() = default;
-    ~MDCore() = default;
+    Core() = default;
+    ~Core() = default;
 
-    void init(const MDCoreConfig& config) {
+    void init(const CoreConfig& config) {
         for (InstrumentId instrument : config.default_instruments) {
             AddInstrument(instrument, config.venues);
         }
     }
 
-    // Fed by whoever owns the MDProvider(s) (the wiring layer, e.g. main.cpp).
-    // MDCore has no knowledge of providers, sockets, or threads.
+    // Fed by whoever owns the Provider(s) (the wiring layer, e.g. main.cpp).
+    // Core has no knowledge of providers, sockets, or threads.
     void ApplyUpdate(const BookUpdate& update) {
         auto venue_it = venue_books_.find(update.instrument);
         if (venue_it == venue_books_.end()) {
@@ -29,22 +31,22 @@ class MDCore {
             return;
         }
 
-        auto& book = venue_it->second[static_cast<size_t>(update.venue)];
-        if (!book) {
+        auto& book_ptr = venue_it->second[static_cast<size_t>(update.venue)];
+        if (!book_ptr) {
             Logger::Log(LogLevel::kWarning, "Received update for unconfigured venue: {}",
                         VenueConverter::ToVenueString(update.venue));
             return;
         }
 
-        book->ApplyUpdate(update);
+        book_ptr->ApplyUpdate(update);
+
+        PrintHelper::Book(*book_ptr);
     }
 
     void Start() {}
     void Stop() {}
 
    private:
-    void Run();
-
     // Creates the 3-slot VenueBookArray for `instrument`, one VenueBook per
     // venue in `venues`. Called from init() for each startup instrument; not
     // exposed as a live "subscribe" API yet (out of scope for now, see
@@ -55,3 +57,5 @@ class MDCore {
 
     InstrumentBooks venue_books_;
 };
+
+}  // namespace market_data

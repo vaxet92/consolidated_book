@@ -1,5 +1,8 @@
 
 #include "venue_book.h"
+#include "logger/logger.h"
+
+namespace market_data {
 
 VenueBook::VenueBook(VenueId venue, InstrumentId instrument) : venue_(venue), instrument_(instrument) {}
 
@@ -41,4 +44,31 @@ void VenueBook::ApplyUpdate(const BookUpdate& update) {
     ApplySide(bids_, update.bids);
     ApplySide(asks_, update.asks);
     last_seq_ = update.seq;
+}
+
+void PrintHelper::Level(const char* side, const PriceLevel& level) {
+    Logger::Log(LogLevel::kInfo, "  {} {} @ {}", side, level.qty, level.price);
+}
+
+void PrintHelper::BBO(const VenueBook& book) {
+    Logger::Log(LogLevel::kInfo, "[{} {}] seq={}", VenueConverter::ToVenueString(book.venue()),
+                VenueConverter::ToInstrumentString(book.instrument()), book.last_seq());
+    if (auto bid = book.BestBid()) {
+        Level("BID", PriceLevel{bid->first, bid->second});
+    }
+    if (auto ask = book.BestAsk()) {
+        Level("ASK", PriceLevel{ask->first, ask->second});
+    }
+}
+
+void PrintHelper::Book(const VenueBook& book) {
+    Logger::Log(LogLevel::kInfo, "[{} {}] seq={}", VenueConverter::ToVenueString(book.venue()),
+                VenueConverter::ToInstrumentString(book.instrument()), book.last_seq());
+    for (const auto& [price, qty] : book.asks()) {
+        Level("ASK", PriceLevel{price, qty});
+    }
+    for (const auto& [price, qty] : book.bids()) {
+        Level("BID", PriceLevel{price, qty});
+    }
+}
 }

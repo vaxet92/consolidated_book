@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "dependencies": [
     "fmt",
-    "gtest"
+    "gtest",
+    "boost-asio",
+    "boost-beast",
+    "openssl",
+    "simdjson"
   ]
 }

@@ -5,5 +5,6 @@ add_executable(server_app
 
 target_link_libraries(server_app PRIVATE
     md_core
+    md_provider
     logger
 )

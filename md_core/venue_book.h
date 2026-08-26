@@ -5,6 +5,8 @@
 #include <vector>
 #include "types.h"
 
+namespace market_data {
+
 template <typename Compare>
 using OrderBookType = std::map<PriceTicks, QtyUnits, Compare>;
 
@@ -21,6 +23,9 @@ class VenueBook {
     InstrumentId instrument() const;
     uint64_t last_seq() const;
 
+    const auto& bids() const { return bids_; }
+    const auto& asks() const { return asks_; }
+
    private:
     template <typename Compare>
     static void ApplySide(OrderBookType<Compare>& side, const std::vector<PriceLevel>& levels);
@@ -31,3 +36,12 @@ class VenueBook {
     OrderBookType<std::greater<PriceTicks>> bids_;  // descending: begin() = best bid
     OrderBookType<std::less<PriceTicks>> asks_;     // ascending: begin() = best ask
 };
+
+class PrintHelper {
+   public:
+    static void Level(const char* side, const PriceLevel& level);
+    static void BBO(const VenueBook& book);
+    static void Book(const VenueBook& book);
+};
+
+}  // namespace market_data
