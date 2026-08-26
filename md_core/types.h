@@ -37,7 +37,7 @@ struct BookUpdate {
 // Whoever loads the config file (main.cpp) translates strings to enums
 // once, at the boundary - Core never parses a string.
 struct CoreConfig {
-    std::vector<VenueId> venues;                     // which venues are enabled
+    std::vector<VenueId> venues;                    // which venues are enabled
     std::vector<InstrumentId> default_instruments;  // subscribed at startup
 };
 

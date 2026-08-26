@@ -7,7 +7,6 @@
 
 namespace market_data {
 
-using VenueBookArray = std::array<std::unique_ptr<VenueBook>, static_cast<size_t>(VenueId::COUNT)>;
 using InstrumentBooks = std::unordered_map<InstrumentId, VenueBookArray>;
 
 class Core {

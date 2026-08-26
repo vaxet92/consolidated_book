@@ -355,6 +355,8 @@ message Update {
   uint64 server_ts_ns = 2;
   string symbol = 3;
   repeated VenueStatus venues = 4;
+  uint32 price_scale = 5;                // exponent: divide price fields by 10^price_scale.
+  uint32 qty_scale = 6;                  // exponent: divide qty fields by 10^qty_scale.
   oneof payload {
     Bbo bbo = 10;
     VolumeBands volume_bands = 11;
@@ -368,7 +370,8 @@ Rationale for one generic streaming RPC over three specialized ones: a new deriv
 
 ### 9.2 Wire conventions
 
-- **All prices/quantities are scaled `int64` with the scale declared in the proto.** No doubles, no decimal strings.
+- **All prices/quantities are scaled `int64`. No doubles, no decimal strings, ever, in server-side computation.** Band math, tie detection at the best price (§5.3), and every other comparison happen in exact `int64` — this is the part that actually breaks under floating point and it is never compromised.
+- **The scale is carried on every message, not just documented in the proto.** `uint32 price_scale` and `uint32 qty_scale` (as an exponent — e.g. `8` means "divide by 10^8", not the raw multiplier) are fields on every `Update`, alongside `symbol`. Protobuf has no 8-bit integer type; varint encoding already makes a small value like `8` cost 1 byte on the wire regardless of the declared 32-bit width, so `uint32` loses nothing. This is a refinement of the original "scale declared in the proto" wording, not a reversal: a client now needs zero out-of-band knowledge to interpret a value, and — same reasoning as `symbol` being present despite one symbol today — nothing has to change on the wire if a future instrument needs a different scale (§1.2's multi-symbol seam). Also matches §7.4: every `Update` is meant to be self-contained, so scale shouldn't need to be remembered from an earlier message either.
 - `symbol` present everywhere despite one symbol today — multi-symbol needs no protocol change.
 - `seq` + `server_ts_ns` on every message so clients can detect conflation and measure end-to-end latency.
 - `venue_status` on every message — freshness is part of the data, not a side channel.

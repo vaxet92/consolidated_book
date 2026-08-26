@@ -1,5 +1,7 @@
 #pragma once
+#include <array>
 #include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -36,6 +38,10 @@ class VenueBook {
     OrderBookType<std::greater<PriceTicks>> bids_;  // descending: begin() = best bid
     OrderBookType<std::less<PriceTicks>> asks_;     // ascending: begin() = best ask
 };
+
+// One VenueBook per venue, indexed by VenueId. A null entry means that
+// venue isn't configured for this instrument.
+using VenueBookArray = std::array<std::unique_ptr<VenueBook>, static_cast<size_t>(VenueId::COUNT)>;
 
 class PrintHelper {
    public:
