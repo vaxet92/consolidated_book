@@ -1,18 +1,25 @@
 #pragma once
+#include <array>
 #include <string>
 
-enum class InstrumentId : int8_t {
+enum class InstrumentId : int16_t {
     UNKNOWN = -1,
     BTCUSDT = 0,
     ETHUSDT = 1,
     SOLUSDT = 2,
 };
 
-enum class VenueId : size_t {
+enum class VenueId : uint16_t {
     BINANCE = 0,
     BYBIT = 1,
     OKX = 2,
     COUNT = 3,
+};
+
+inline constexpr std::array<VenueId, static_cast<size_t>(VenueId::COUNT)> VenueIdArray{
+    VenueId::BINANCE,
+    VenueId::BYBIT,
+    VenueId::OKX,
 };
 
 class VenueConverter {

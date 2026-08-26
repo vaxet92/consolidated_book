@@ -10,4 +10,5 @@ target_include_directories(md_core PUBLIC
 
 target_link_libraries(md_core PUBLIC
     types
+    logger
 )

@@ -5,8 +5,6 @@
 
 #include "types/venue.h"
 
-struct MDCoreConfig {};
-
 using PriceTicks = uint64_t;         // price x 1e8, integral on the canonical grid. Never negative.
 using QtyUnits = uint64_t;           // base quantity x 1e8. Never negative.
 using Notional = unsigned __int128;  // ticks * units - needs the extra width. Never negative.
@@ -31,4 +29,12 @@ struct BookUpdate {
     bool is_snapshot;    // true = full replace, false = incremental delta
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
+};
+
+// MDCore's own config, typed (VenueId/InstrumentId), not ServerConfig's raw
+// strings. Whoever loads the config file (main.cpp) translates strings to
+// enums once, at the boundary - MDCore never parses a string.
+struct MDCoreConfig {
+    std::vector<VenueId> venues;               // which venues are enabled
+    std::vector<InstrumentId> default_instruments;  // subscribed at startup
 };
