@@ -7,11 +7,13 @@ add_executable(unit_tests
     src/test_binance_parser.cpp
     src/test_bybit_parser.cpp
     src/test_okx_parser.cpp
+    src/test_conflated_channel.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
     GTest::gtest_main
     md_core
+    aggregator
     md_provider
 )
 

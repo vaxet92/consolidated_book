@@ -7,6 +7,8 @@
     "boost-asio",
     "boost-beast",
     "openssl",
-    "simdjson"
+    "simdjson",
+    "protobuf",
+    "grpc"
   ]
 }

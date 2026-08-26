@@ -1,9 +1,10 @@
 #include "consolidated_bbo.h"
 
 namespace market_data {
+namespace consolidated {
 
-ConsolidatedBBO ComputeConsolidatedBBO(const VenueBookArray& books) {
-    ConsolidatedBBO result;
+BBO ComputeBBO(const VenueBookArray& books) {
+    BBO result;
     auto& best_bid = result.best_bid;
     auto& best_ask = result.best_ask;
 
@@ -38,7 +39,6 @@ ConsolidatedBBO ComputeConsolidatedBBO(const VenueBookArray& books) {
     if (best_bid.price && best_ask.price) {
         // Compare-then-subtract, never a raw subtraction of two unsigned
         // values that could go negative - same convention as types.h.
-
         result.crossed = best_bid.price >= best_ask.price;
     } else {
         result.crossed = false;
@@ -47,4 +47,5 @@ ConsolidatedBBO ComputeConsolidatedBBO(const VenueBookArray& books) {
     return result;
 }
 
+}  // namespace consolidated
 }  // namespace market_data

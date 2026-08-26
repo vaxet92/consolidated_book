@@ -1,0 +1,100 @@
+syntax = "proto3";
+
+package market_data;
+
+service Aggregator {
+  rpc Subscribe(SubscribeRequest) returns (stream Update);
+}
+
+enum Feed {
+  FEED_UNSPECIFIED = 0;
+  BBO = 1;
+  VOLUME_BANDS = 2;
+  PRICE_BANDS = 3;
+}
+
+enum Venue {
+  VENUE_UNSPECIFIED = 0;
+  BINANCE = 1;
+  BYBIT = 2;
+  OKX = 3;
+}
+
+message SubscribeRequest {
+  string symbol = 1;                    // "BTCUSDT"
+  repeated Feed feeds = 2;
+  repeated int64 notional_bands = 3;    // scaled; defaults applied if empty. VOLUME_BANDS param.
+  repeated uint32 bps_bands = 4;        // defaults applied if empty. PRICE_BANDS param.
+  uint32 throttle_ms = 5;               // client-requested conflation rate
+}
+
+message VenueQuote {
+  Venue venue = 1;
+  int64 qty = 2;
+}
+
+message ConsolidatedPriceLevel {
+  int64 price = 1;
+  int64 total_qty = 2;
+  repeated VenueQuote venues = 3;  // only venues quoting exactly this price
+}
+
+message Bbo {
+  ConsolidatedPriceLevel best_bid = 1;
+  ConsolidatedPriceLevel best_ask = 2;
+  bool crossed = 3;
+}
+
+message VolumeBandResult {
+  int64 notional_threshold = 1;   // which band this result is for, e.g. 1_000_000 scaled
+  int64 vwap = 2;
+  int64 worst_price = 3;          // last level touched
+  int64 filled_notional = 4;
+  int64 filled_qty = 5;
+  bool insufficient_depth = 6;
+}
+
+message VolumeBands {
+  repeated VolumeBandResult bid_bands = 1;
+  repeated VolumeBandResult ask_bands = 2;
+}
+
+message PriceBandResult {
+  uint32 bps_threshold = 1;
+  int64 cum_qty = 2;
+  int64 cum_notional = 3;
+  int64 vwap = 4;
+  uint32 level_count = 5;
+  int64 limit_price = 6;
+}
+
+message PriceBands {
+  repeated PriceBandResult bid_bands = 1;
+  repeated PriceBandResult ask_bands = 2;
+}
+
+// TODO: not populated yet - staleness policy (DESIGN_1 §6) is not built.
+// Only `venue` and `contributed` can be honestly filled in today (from
+// whether ComputeConsolidatedBBO saw any data from this venue); state,
+// age_ms, and drift_ms are placeholders for the watchdog/drift detector.
+message VenueStatus {
+  Venue venue = 1;
+  bool contributed = 2;
+  uint64 last_seq = 3;
+  uint32 age_ms = 4;
+  int32 drift_ms = 5;
+}
+
+message Update {
+  uint64 seq = 1;                       // server-side monotonic; gaps = conflation
+  uint64 server_ts_ns = 2;
+  string symbol = 3;
+  repeated VenueStatus venues = 4;
+  uint32 price_scale = 5;               // exponent: divide price fields by 10^price_scale
+  uint32 qty_scale = 6;                 // exponent: divide qty fields by 10^qty_scale
+  oneof payload {
+    Bbo bbo = 10;
+    VolumeBands volume_bands = 11;
+    PriceBands price_bands = 12;
+  }
+}

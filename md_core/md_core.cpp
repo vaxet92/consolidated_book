@@ -1,6 +1,38 @@
 #include "md_core.h"
 using namespace market_data;
 
+void Core::Init(const CoreConfig& config) {
+    for (InstrumentId instrument : config.default_instruments) {
+        AddInstrument(instrument, config.venues);
+    }
+}
+
+// Fed by whoever owns the Provider(s) (the wiring layer, e.g. main.cpp).
+// Core has no knowledge of providers, sockets, or threads.
+void Core::ApplyUpdate(const BookUpdate& update) {
+    auto venue_it = venue_books_.find(update.instrument);
+    if (venue_it == venue_books_.end()) {
+        Logger::Log(LogLevel::kWarning, "Received update for unknown instrument: {}",
+                    VenueConverter::ToInstrumentString(update.instrument));
+        return;
+    }
+
+    auto& book_ptr = venue_it->second[static_cast<size_t>(update.venue)];
+    if (!book_ptr) {
+        Logger::Log(LogLevel::kWarning, "Received update for unconfigured venue: {}",
+                    VenueConverter::ToVenueString(update.venue));
+        return;
+    }
+
+    book_ptr->ApplyUpdate(update);
+
+    PrintHelper::Book(*book_ptr);
+
+    if (bbo_callback_) {
+        bbo_callback_(update.instrument, consolidated::ComputeBBO(venue_it->second));
+    }
+}
+
 void Core::AddInstrument(InstrumentId instrument, const std::vector<VenueId>& venues) {
     VenueBookArray venue_books;
     for (VenueId venue : venues) {

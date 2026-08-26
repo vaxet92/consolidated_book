@@ -18,7 +18,7 @@ int main() {
     };
 
     market_data::Core core;
-    core.init(config);
+    core.Init(config);
     core.Start();
 
     auto on_update = [&core](const market_data::BookUpdate& update) { core.ApplyUpdate(update); };
