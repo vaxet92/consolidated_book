@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <string>
+#include <string_view>
 
 enum class InstrumentId : int16_t {
     UNKNOWN = -1,
@@ -21,6 +22,17 @@ inline constexpr std::array<VenueId, static_cast<size_t>(VenueId::COUNT)> VenueI
     VenueId::BYBIT,
     VenueId::OKX,
 };
+
+inline constexpr std::string_view kBinanceHost = "stream.binance.com";
+inline constexpr std::string_view kBinancePort = "9443";
+
+inline constexpr std::string_view kBybitHost = "stream.bybit.com";
+inline constexpr std::string_view kBybitPort = "443";
+static constexpr std::string_view kByBitPath = "/v5/public/spot";
+
+inline constexpr std::string_view kOkxHost = "ws.okx.com";
+inline constexpr std::string_view kOkxPort = "8443";
+static constexpr std::string_view kOkxPath = "/ws/v5/public";
 
 class VenueConverter {
    public:

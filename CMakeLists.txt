@@ -22,11 +22,12 @@ add_subdirectory(md_core)
 add_subdirectory(md_provider)
 
 
-if (BUILD_SERVER)
-  add_subdirectory(server)
-endif()
+# if (BUILD_SERVER)
+#   add_subdirectory(server)
+# endif()
 
 if (BUILD_TESTS)
   enable_testing()
-  add_subdirectory(unit_tests)
+  add_subdirectory(tests/unit_tests)
+  add_subdirectory(tests/mock_tests)
 endif()

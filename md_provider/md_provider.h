@@ -17,6 +17,8 @@ namespace market_data {
 struct ProviderConfig {
     VenueId venue_id;
     InstrumentId instrument;  // spot only for now
+    std::string host;         // e.g. "stream.binance.com" - venue-specific, but data, not baked into the class
+    std::string port;         // e.g. "9443"
 };
 
 class Provider {
@@ -35,9 +37,12 @@ class Provider {
     // Depth stream: the real book. Venue-specific parsing.
     virtual void OnDepthMessage(const std::string& message) = 0;
     virtual std::string DepthSubscriptionMessage() const = 0;
-    virtual const char* GetHost() const = 0;
-    virtual const char* GetPort() const = 0;
     virtual const char* GetDepthPath() const = 0;
+
+    // Host/port are config data now, not per-venue behavior - no subclass
+    // needs to override these anymore.
+    const char* GetHost() const { return config.host.c_str(); }
+    const char* GetPort() const { return config.port.c_str(); }
 
     // Fast-BBO stream: correctness oracle only (DESIGN_1 §4.4) - never
     // published through the CallBack. The >200ms-disagreement resync check

@@ -3,11 +3,15 @@ find_package(GTest REQUIRED)
 
 add_executable(unit_tests
     src/test_venue_book.cpp
+    src/test_binance_parser.cpp
+    src/test_bybit_parser.cpp
+    src/test_okx_parser.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
     GTest::gtest_main
     md_core
+    md_provider
 )
 
 include(GoogleTest)

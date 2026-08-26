@@ -10,6 +10,11 @@ add_library(md_provider STATIC
     md_provider.cpp
     ws/ws.cpp
     binance/binance_provider.cpp
+    binance/binance_parser.cpp
+    bybit/bybit_provider.cpp
+    bybit/bybit_parser.cpp
+    okx/okx_provider.cpp
+    okx/okx_parser.cpp
 )
 
 target_include_directories(md_provider PUBLIC

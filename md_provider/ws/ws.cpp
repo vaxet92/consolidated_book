@@ -1,8 +1,7 @@
 #include "ws.h"
-#include "root_certificates.hpp"
 
 static void fail(beast::error_code ec, const char* what) {
-    std::cerr << "[WebSocket Error] " << what << ": " << ec.message() << "\n";
+    Logger::Log(LogLevel::kError, "[WebSocket] {}: {}", what, ec.message());
 }
 
 WebSocketSessionSSL::WebSocketSessionSSL(net::io_context& ioc, ssl::context& ctx,
@@ -12,31 +11,39 @@ WebSocketSessionSSL::WebSocketSessionSSL(net::io_context& ioc, ssl::context& ctx
       onMessageCallback(std::move(onMessageCallback)),
       stopped(false) {}
 
-void WebSocketSessionSSL::Run(const char* inHost, const char* inPort, const char* inTarget) {
-    if (stopped) return;
-    
+void WebSocketSessionSSL::Run(const char* inHost, const char* inPort, const char* inTarget,
+                              std::string subscribeMessage) {
+    if (stopped) {
+        return;
+    }
+
     host = inHost;
     target = inTarget;
+    subscribe_message_ = std::move(subscribeMessage);
 
-    resolver.async_resolve(
-        inHost, inPort,
-        beast::bind_front_handler(&WebSocketSessionSSL::OnResolve, shared_from_this()));
+    resolver.async_resolve(inHost, inPort,
+                           beast::bind_front_handler(&WebSocketSessionSSL::OnResolve, shared_from_this()));
 }
 
 void WebSocketSessionSSL::OnResolve(beast::error_code ec, tcp::resolver::results_type results) {
-    if (ec) return fail(ec, "resolve");
-    if (stopped) return;
+    if (ec) {
+        return fail(ec, "resolve");
+    } else if (stopped) {
+        return;
+    }
 
     beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(WS_TIMER_RATE));
 
     beast::get_lowest_layer(ws).async_connect(
-        results,
-        beast::bind_front_handler(&WebSocketSessionSSL::OnConnect, shared_from_this()));
+        results, beast::bind_front_handler(&WebSocketSessionSSL::OnConnect, shared_from_this()));
 }
 
 void WebSocketSessionSSL::OnConnect(beast::error_code ec, tcp::resolver::results_type::endpoint_type ep) {
-    if (ec) return fail(ec, "connect");
-    if (stopped) return;
+    if (ec) {
+        return fail(ec, "connect");
+    } else if (stopped) {
+        return;
+    }
 
     beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(WS_TIMER_RATE));
 
@@ -47,16 +54,18 @@ void WebSocketSessionSSL::OnConnect(beast::error_code ec, tcp::resolver::results
     }
 
     // Update host with port for handshake
-    std::string host_with_port = host + ':' + std::to_string(ep.port());
+    std::string host_with_port = fmt::format("{}:{}", host, ep.port());
 
     ws.next_layer().async_handshake(
-        ssl::stream_base::client,
-        beast::bind_front_handler(&WebSocketSessionSSL::OnSslHandshake, shared_from_this()));
+        ssl::stream_base::client, beast::bind_front_handler(&WebSocketSessionSSL::OnSslHandshake, shared_from_this()));
 }
 
 void WebSocketSessionSSL::OnSslHandshake(beast::error_code ec) {
-    if (ec) return fail(ec, "ssl_handshake");
-    if (stopped) return;
+    if (ec) {
+        return fail(ec, "ssl_handshake");
+    } else if (stopped) {
+        return;
+    }
 
     beast::get_lowest_layer(ws).expires_never();
 
@@ -65,51 +74,60 @@ void WebSocketSessionSSL::OnSslHandshake(beast::error_code ec) {
         req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " consolidated-candles");
     }));
 
-    ws.async_handshake(
-        host, target,
-        beast::bind_front_handler(&WebSocketSessionSSL::OnHandshake, shared_from_this()));
+    ws.async_handshake(host, target, beast::bind_front_handler(&WebSocketSessionSSL::OnHandshake, shared_from_this()));
 }
 
 void WebSocketSessionSSL::OnHandshake(beast::error_code ec) {
-    if (ec) return fail(ec, "handshake");
-    if (stopped) return;
+    if (ec) {
+        return fail(ec, "handshake");
+    } else if (stopped) {
+        return;
+    }
+    Logger::Log(LogLevel::kInfo, "[WebSocket] Handshake successful with {}{}", host, target);
 
-    std::cout << "[WebSocket] Connected to " << host << target << std::endl;
+    if (!subscribe_message_.empty()) {
+        ws.async_write(net::buffer(subscribe_message_),
+                       beast::bind_front_handler(&WebSocketSessionSSL::OnSubscribeWrite, shared_from_this()));
+        return;
+    }
 
-    ws.async_read(
-        buffer,
-        beast::bind_front_handler(&WebSocketSessionSSL::OnRead, shared_from_this()));
+    ws.async_read(buffer, beast::bind_front_handler(&WebSocketSessionSSL::OnRead, shared_from_this()));
+}
+
+void WebSocketSessionSSL::OnSubscribeWrite(beast::error_code ec, std::size_t bytes_transferred) {
+    if (ec) {
+        return fail(ec, "subscribe_write");
+    } else if (stopped) {
+        return;
+    }
+
+    ws.async_read(buffer, beast::bind_front_handler(&WebSocketSessionSSL::OnRead, shared_from_this()));
 }
 
 void WebSocketSessionSSL::OnRead(beast::error_code ec, std::size_t bytes_transferred) {
     if (ec == websocket::error::closed) {
         std::cout << "[WebSocket] Connection closed\n";
         return;
+    } else if (ec) {
+        return fail(ec, "read");
+    } else if (stopped) {
+        return;
     }
-    if (ec) return fail(ec, "read");
-    if (stopped) return;
 
     if (bytes_transferred > 0 && onMessageCallback) {
         std::string message = beast::buffers_to_string(buffer.data());
         buffer.consume(bytes_transferred);
-        
+
         // Call the message callback
         onMessageCallback(message);
     }
 
     // Continue reading
-    ws.async_read(
-        buffer,
-        beast::bind_front_handler(&WebSocketSessionSSL::OnRead, shared_from_this()));
+    ws.async_read(buffer, beast::bind_front_handler(&WebSocketSessionSSL::OnRead, shared_from_this()));
 }
 
 void WebSocketSessionSSL::Stop() {
     stopped = true;
-    beast::error_code ec;
-    ws.close(websocket::close_code::normal, ec);
-    if (ec) {
-        fail(ec, "close");
-    }
 }
 
 void WebSocketSessionSSL::OnClose(beast::error_code ec) {

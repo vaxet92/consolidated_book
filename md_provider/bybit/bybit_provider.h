@@ -1,36 +1,27 @@
 #pragma once
 
-#include "../base_provider.h"
+#include "md_provider/md_provider.h"
+#include "types/venue.h"
 #include <string>
-#include <sstream>
 
-class BybitProvider : public BaseProvider {
-public:
-    explicit BybitProvider(const ProviderConfig& config);
+namespace market_data {
+
+class BybitProvider : public Provider {
+   public:
+    explicit BybitProvider(const ProviderConfig& config, CallBack callback);
     ~BybitProvider() override = default;
 
-protected:
-    void OnMessage(const std::string& message) override;
-    std::string GetSubscriptionMessage() const override;
-    const char* GetHost() const override;
-    const char* GetPort() const override;
-    const char* GetPath() const override;
+   protected:
+    void OnDepthMessage(const std::string& message) override;
+    void OnBboMessage(const std::string& message) override;
 
-private:
-    void ParseTrade(const std::string& message);
-    
-    static constexpr const char* BYBIT_HOST = "stream.bybit.com";
-    static constexpr const char* BYBIT_PORT = "443";
+    // Bybit uses one generic public endpoint - both depth and BBO need an
+    // explicit {"op":"subscribe",...} frame after connecting.
+    std::string DepthSubscriptionMessage() const override;
+    std::string BboSubscriptionMessage() const override;
+
+    const char* GetDepthPath() const override { return kByBitPath.data(); }
+    const char* GetBboPath() const override { return kByBitPath.data(); }
 };
 
-
-// wss://stream.bybit.com/v5/public/spot
-
-// {
-//     "op": "subscribe",
-//     "args": [
-//       "publicTrade.BTCUSDT",
-//       "publicTrade.ETHUSDT",
-//       "publicTrade.SOLUSDT"
-//     ]
-//   }
+}  // namespace market_data

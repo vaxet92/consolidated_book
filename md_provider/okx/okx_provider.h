@@ -1,24 +1,27 @@
 #pragma once
 
-#include "../base_provider.h"
+#include "md_provider/md_provider.h"
+#include "types/venue.h"
 #include <string>
-#include <sstream>
 
-class OKXProvider : public BaseProvider {
-public:
-    explicit OKXProvider(const ProviderConfig& config);
+namespace market_data {
+
+class OKXProvider : public Provider {
+   public:
+    explicit OKXProvider(const ProviderConfig& config, CallBack callback);
     ~OKXProvider() override = default;
 
-protected:
-    void OnMessage(const std::string& message) override;
-    std::string GetSubscriptionMessage() const override;
-    const char* GetHost() const override;
-    const char* GetPort() const override;
-    const char* GetPath() const override;
+   protected:
+    void OnDepthMessage(const std::string& message) override;
+    void OnBboMessage(const std::string& message) override;
 
-private:
-    void ParseTrade(const std::string& message);
-    
-    static constexpr const char* OKX_HOST = "ws.okx.com";
-    static constexpr const char* OKX_PORT = "8443";
+    // OKX uses one generic public endpoint - both depth and BBO need an
+    // explicit {"op":"subscribe",...} frame after connecting.
+    std::string DepthSubscriptionMessage() const override;
+    std::string BboSubscriptionMessage() const override;
+
+    const char* GetDepthPath() const override { return kOkxPath.data(); }
+    const char* GetBboPath() const override { return kOkxPath.data(); }
 };
+
+}  // namespace market_data

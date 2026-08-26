@@ -10,6 +10,8 @@
 #include <memory>
 #include <string>
 #include <iostream>
+#include "root_certificates.hpp"
+#include "logger/logger.h"
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -21,19 +23,24 @@ using tcp = boost::asio::ip::tcp;
 #define WS_TIMER_RATE 30
 
 class WebSocketSessionSSL : public std::enable_shared_from_this<WebSocketSessionSSL> {
-public:
+   public:
     explicit WebSocketSessionSSL(net::io_context& ioc, ssl::context& ctx,
                                  std::function<void(const std::string&)> onMessageCallback);
     ~WebSocketSessionSSL() = default;
-    
-    void Run(const char* inHost, const char* inPort, const char* inTarget);
+
+    // If subscribeMessage is non-empty, it is sent once, right after the
+    // handshake completes and before the read loop starts. Binance connects
+    // directly to a per-stream URL and passes "" here; Bybit/OKX use one
+    // generic endpoint and need an explicit {"op":"subscribe",...} frame.
+    void Run(const char* inHost, const char* inPort, const char* inTarget, std::string subscribeMessage = "");
     void Stop();
 
-private:
+   private:
     void OnResolve(beast::error_code ec, tcp::resolver::results_type results);
     void OnConnect(beast::error_code ec, tcp::resolver::results_type::endpoint_type ep);
     void OnSslHandshake(beast::error_code ec);
     void OnHandshake(beast::error_code ec);
+    void OnSubscribeWrite(beast::error_code ec, std::size_t bytes_transferred);
     void OnRead(beast::error_code ec, std::size_t bytes_transferred);
     void OnClose(beast::error_code ec);
 
@@ -42,6 +49,7 @@ private:
     beast::flat_buffer buffer;
     std::string host;
     std::string target;
+    std::string subscribe_message_;
     std::function<void(const std::string&)> onMessageCallback;
     bool stopped;
 };

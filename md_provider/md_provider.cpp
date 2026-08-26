@@ -67,8 +67,8 @@ void Provider::Run() {
             Logger::Log(LogLevel::kInfo, "[{}] Connecting to {}...", VenueConverter::ToVenueString(config.venue_id),
                         GetHost());
 
-            depth_session_->Run(GetHost(), GetPort(), GetDepthPath());
-            bbo_session_->Run(GetHost(), GetPort(), GetBboPath());
+            depth_session_->Run(GetHost(), GetPort(), GetDepthPath(), DepthSubscriptionMessage());
+            bbo_session_->Run(GetHost(), GetPort(), GetBboPath(), BboSubscriptionMessage());
 
             // Run the io_context - drives both sessions on this one thread.
             ioc.run();
