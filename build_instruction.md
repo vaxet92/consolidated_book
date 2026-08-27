@@ -69,3 +69,6 @@ cmake --build build_debug -j
 
 Neither `VCPKG_ROOT` nor `ninja` is currently set up in this shell - the
 plain build above is the one that actually works right now.
+
+export CC=/opt/homebrew/opt/llvm/bin/clang
+export CXX=/opt/homebrew/opt/llvm/bin/clang++

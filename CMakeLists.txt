@@ -22,6 +22,8 @@ add_subdirectory(md_core)
 add_subdirectory(md_provider)
 add_subdirectory(md_proto)
 add_subdirectory(aggregator)
+add_subdirectory(client)
+
 
 
 # if (BUILD_SERVER)

@@ -13,7 +13,6 @@ add_executable(unit_tests
 
 target_link_libraries(unit_tests PRIVATE
     GTest::gtest_main
-    md_core
     aggregator
     md_provider
 )

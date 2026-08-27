@@ -12,3 +12,13 @@ target_link_libraries(aggregator PUBLIC
     md_core
     md_proto
 )
+
+add_executable(aggregator_app
+    main.cpp
+)
+
+target_link_libraries(aggregator_app PRIVATE
+    aggregator
+    md_provider
+    logger
+)

@@ -30,7 +30,7 @@ void Core::ApplyUpdate(const BookUpdate& update) {
 
     book_ptr->ApplyUpdate(update);
 
-    PrintHelper::Book(*book_ptr);
+    // PrintHelper::Book(*book_ptr);
 
     if (bbo_callback_) {
         bbo_callback_(update.instrument, consolidated::ComputeBBO(venue_it->second));
