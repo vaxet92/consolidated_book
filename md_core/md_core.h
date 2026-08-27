@@ -6,6 +6,7 @@
 #include "types.h"
 #include "logger/logger.h"
 #include <functional>
+#include <mutex>
 
 namespace market_data {
 
@@ -35,6 +36,13 @@ class Core {
     void AddInstrument(InstrumentId instrument, const std::vector<VenueId>& venues);
     void RemoveInstrument(InstrumentId instrument);
 
+    // Interim fix, not the final architecture: guards venue_books_ against
+    // concurrent ApplyUpdate() calls from multiple Provider threads. The
+    // designed fix (DESIGN_1 §7.3) is per-venue SPSC queues drained by one
+    // consolidator thread, with no lock on the book path at all - not built
+    // yet. This mutex is correct but costs contention the real design
+    // wouldn't have; remove it once the SPSC queue replaces this.
+    std::mutex apply_mutex_;
     BboCallback bbo_callback_;
     InstrumentBooks venue_books_;
 };

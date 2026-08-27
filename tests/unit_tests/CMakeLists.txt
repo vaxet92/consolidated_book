@@ -8,6 +8,7 @@ add_executable(unit_tests
     src/test_bybit_parser.cpp
     src/test_okx_parser.cpp
     src/test_conflated_channel.cpp
+    src/test_wire_translation.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE

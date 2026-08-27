@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package market_data;
+package market_data.wire;
 
 service Aggregator {
   rpc Subscribe(SubscribeRequest) returns (stream Update);

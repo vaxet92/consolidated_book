@@ -10,6 +10,10 @@ void Core::Init(const CoreConfig& config) {
 // Fed by whoever owns the Provider(s) (the wiring layer, e.g. main.cpp).
 // Core has no knowledge of providers, sockets, or threads.
 void Core::ApplyUpdate(const BookUpdate& update) {
+    // Interim fix (see the comment on apply_mutex_ in md_core.h) - multiple
+    // Provider threads can call this concurrently on the same Core.
+    std::lock_guard<std::mutex> lock(apply_mutex_);
+
     auto venue_it = venue_books_.find(update.instrument);
     if (venue_it == venue_books_.end()) {
         Logger::Log(LogLevel::kWarning, "Received update for unknown instrument: {}",
