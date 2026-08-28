@@ -13,17 +13,10 @@ namespace market_data {
 std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, VenueId venue,
                                                     InstrumentId instrument);
 
-// Top-of-book only, from Binance's bookTicker stream. Distinct shape from
-// depthUpdate (flat top-level b/B/a/A fields, no nested book) - not a
-// BookUpdate, since there is no "rest of the book" in this message.
-struct BboQuote {
-    PriceTicks bid_price;
-    QtyUnits bid_qty;
-    PriceTicks ask_price;
-    QtyUnits ask_qty;
-};
-
+// Parses one Binance bookTicker message: {"u","s","b","B","a","A"} - always
+// carries both sides, no deltas, so a complete BboQuote comes from every
+// message with no carried-over state. `u` is the order-book update ID.
 // Returns std::nullopt for non-bookTicker messages. Never throws.
-std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message);
+std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message, VenueId venue, InstrumentId instrument);
 
 }  // namespace market_data

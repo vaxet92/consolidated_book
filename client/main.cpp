@@ -73,12 +73,19 @@ int main() {
             backoff_seconds = 1;  // healthy stream - reset the backoff
 
             if (last_seq && update.seq() != *last_seq + 1) {
-                // Client-side gap detection (§9.3): a skipped seq means the
-                // server's depth-1 conflation (§7.4) overwrote a pending
-                // update before we read it. Expected under load, not an
-                // error - but the contract says say so, out loud, on stderr.
-                fmt::print(stderr, "[gap] expected seq {}, got {} ({} update(s) conflated away)\n", *last_seq + 1,
-                           update.seq(), update.seq() - *last_seq - 1);
+                if (update.seq() > *last_seq) {
+                    // Client-side gap detection (§9.3): a skipped seq means the
+                    // server's depth-1 conflation (§7.4) overwrote a pending
+                    // update before we read it. Expected under load, not an
+                    // error - but the contract says say so, out loud, on stderr.
+                    fmt::print(stderr, "[gap] expected seq {}, got {} ({} update(s) conflated away)\n", *last_seq + 1,
+                               update.seq(), update.seq() - *last_seq - 1);
+                } else {
+                    // Not conflation - seq went backwards. Means the server
+                    // restarted (its counter resets to 0) or published out of
+                    // order. Subtracting here would underflow on uint64_t.
+                    fmt::print(stderr, "[seq-reset] seq went backwards: {} -> {}\n", *last_seq, update.seq());
+                }
             }
             last_seq = update.seq();
 
@@ -87,16 +94,16 @@ int main() {
             }
             const auto& bbo = update.bbo();
 
-            if (!bbo.crossed()) {
-                fmt::print("seq={} {} bid {} : {} [{}] | ask {} : {} [{}]{}\n", update.seq(), update.symbol(),
+            // if (!bbo.crossed()) {
+            fmt::print("seq={} {} bid {} : {} [{}] | ask {} : {} [{}]{}\n", update.seq(), update.symbol(),
 
-                           FormatScaled(bbo.best_bid().price(), update.price_scale()),
-                           FormatScaled(bbo.best_bid().total_qty(), update.qty_scale()),
-                           FormatVenues(bbo.best_bid(), update.qty_scale()),
-                           FormatScaled(bbo.best_ask().price(), update.price_scale()),
-                           FormatScaled(bbo.best_ask().total_qty(), update.qty_scale()),
-                           FormatVenues(bbo.best_ask(), update.qty_scale()), bbo.crossed() ? " CROSSED" : "");
-            }
+                       FormatScaled(bbo.best_bid().price(), update.price_scale()),
+                       FormatScaled(bbo.best_bid().total_qty(), update.qty_scale()),
+                       FormatVenues(bbo.best_bid(), update.qty_scale()),
+                       FormatScaled(bbo.best_ask().price(), update.price_scale()),
+                       FormatScaled(bbo.best_ask().total_qty(), update.qty_scale()),
+                       FormatVenues(bbo.best_ask(), update.qty_scale()), bbo.crossed() ? " CROSSED" : "");
+            // }
         }
 
         grpc::Status status = reader->Finish();

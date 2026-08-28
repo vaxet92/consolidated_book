@@ -41,6 +41,31 @@ struct BBO {
 // `BBO result;` in the implementation.
 BBO ComputeBBO(const VenueBookArray& books);
 
+// Consolidates the fast-BBO stream quotes (DESIGN_1 §4.4 option 1). Same
+// max-bid / min-ask / tie-attribution logic as ComputeBBO, but sourced
+// from the venues' own top-of-book channels instead of our depth books:
+// lower latency, and independent of depth-book sync state.
+// VenueQuoteArray comes from types.h - unqualified here because
+// `consolidated` is nested inside market_data.
+//
+// Full scan over all venues, O(venues). Used to build from scratch, as the
+// rescan fallback inside UpdateBBOWithQuote, and as the test oracle the
+// incremental path is checked against - the same role std::map plays for
+// VenueBook (§5.1).
+BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes);
+
+// Incremental: folds one venue's new quote into an existing BBO.
+// O(venues at the best level) - typically 1 - instead of O(venues), falling
+// back to a full rescan of one side only when the last venue leaves that
+// side's best level. Built for larger venue counts; at 3 venues it is a
+// wash with ComputeBBOFromQuotes.
+//
+// PRECONDITION: `quotes` must ALREADY contain `update` - the caller stores
+// the quote before calling this, because the rescan path re-reads it from
+// there. Passing a stale array silently produces a wrong book, and only on
+// the rare rescan path, so the bug would hide for a long time.
+void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes);
+
 // TODO: not built yet. Will follow once §8.2/§8.3's band math lands in
 // md_core - ComputeVolumeBands(...), ComputePriceBands(...).
 

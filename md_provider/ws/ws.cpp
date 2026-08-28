@@ -101,6 +101,8 @@ void WebSocketSessionSSL::OnSubscribeWrite(beast::error_code ec, std::size_t byt
         return;
     }
 
+    Logger::Log(LogLevel::kInfo, "[WebSocket] Subscribed to {}:{}", host, subscribe_message_);
+
     ws.async_read(buffer, beast::bind_front_handler(&WebSocketSessionSSL::OnRead, shared_from_this()));
 }
 

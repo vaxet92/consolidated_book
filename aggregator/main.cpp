@@ -32,6 +32,7 @@ int main() {
     core.Init(config);
 
     auto on_update = [&core](const BookUpdate& update) { core.ApplyUpdate(update); };
+    auto on_quote = [&core](const BboQuote& quote) { core.ApplyQuote(quote); };
 
     std::vector<std::unique_ptr<Provider>> providers;
 
@@ -41,7 +42,7 @@ int main() {
         .host = std::string(kBinanceHost),
         .port = std::string(kBinancePort),
     };
-    providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update));
+    providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update, on_quote));
 
     ProviderConfig bybit_config = {
         .venue_id = VenueId::BYBIT,
@@ -49,7 +50,7 @@ int main() {
         .host = std::string(kBybitHost),
         .port = std::string(kBybitPort),
     };
-    providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update));
+    providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update, on_quote));
 
     ProviderConfig okx_config = {
         .venue_id = VenueId::OKX,
@@ -57,7 +58,7 @@ int main() {
         .host = std::string(kOkxHost),
         .port = std::string(kOkxPort),
     };
-    providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update));
+    providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update, on_quote));
 
     for (auto& provider : providers) {
         provider->Start();

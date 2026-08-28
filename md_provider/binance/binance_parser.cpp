@@ -64,11 +64,18 @@ std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, V
     }
 }
 
-std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message) {
+std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message, VenueId venue, InstrumentId instrument) {
     try {
         ondemand::parser parser;
         padded_string json(message);
         ondemand::document doc = parser.iterate(json);
+
+        // Read in wire order (u, s, b, B, a, A) - simdjson on-demand scans
+        // forward, so matching the document's own order is cheapest.
+        auto update_id_result = doc["u"].get_uint64();
+        if (update_id_result.error()) {
+            return std::nullopt;  // not a bookTicker payload (e.g. a subscribe ack)
+        }
 
         auto bid_price_result = doc["b"].get_string();
         auto bid_qty_result = doc["B"].get_string();
@@ -76,10 +83,14 @@ std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message) {
         auto ask_qty_result = doc["A"].get_string();
 
         if (bid_price_result.error() || bid_qty_result.error() || ask_price_result.error() || ask_qty_result.error()) {
-            return std::nullopt;  // not a bookTicker payload (e.g. a subscribe ack)
+            return std::nullopt;
         }
 
         BboQuote quote;
+        quote.venue = venue;
+        quote.instrument = instrument;
+        quote.seq = update_id_result.value();
+        // bookTicker carries no exchange timestamp - exch_ts_ns stays 0.
         quote.bid_price = ParseScaledDecimal(bid_price_result.value());
         quote.bid_qty = ParseScaledDecimal(bid_qty_result.value());
         quote.ask_price = ParseScaledDecimal(ask_price_result.value());

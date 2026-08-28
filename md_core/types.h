@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -32,6 +33,29 @@ struct BookUpdate {
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
 };
+
+// Top-of-book from a venue's fast-BBO stream (Binance @bookTicker, Bybit
+// orderbook.1, OKX bbo-tbt). Deliberately NOT a BookUpdate and never
+// applied to a VenueBook: the two streams are not mutually sequenced, and
+// splicing fast-BBO into the depth book corrupts it (DESIGN_1 §4.4).
+struct BboQuote {
+    VenueId venue;
+    InstrumentId instrument;
+    uint64_t seq = 0;        // venue-native: Binance `u`, Bybit `seq`, OKX `seqId`
+    int64_t recv_ts_ns = 0;  // ours, stamped by the provider
+    int64_t exch_ts_ns = 0;  // venue's, where available (Binance bookTicker has none)
+    PriceTicks bid_price = 0;
+    QtyUnits bid_qty = 0;
+    PriceTicks ask_price = 0;
+    QtyUnits ask_qty = 0;
+};
+
+// One latest fast-BBO quote per venue, indexed by VenueId. A quote with
+// price == 0 means that venue hasn't sent one yet. Raw per-venue input to
+// consolidation, not consolidated output - which is why it lives here at
+// market_data scope, mirroring VenueBookArray, rather than in the
+// `consolidated` namespace.
+using VenueQuoteArray = std::array<BboQuote, static_cast<size_t>(VenueId::COUNT)>;
 
 // Core's own config, typed (VenueId/InstrumentId), not raw strings.
 // Whoever loads the config file (main.cpp) translates strings to enums

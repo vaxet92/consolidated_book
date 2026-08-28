@@ -18,8 +18,8 @@ std::string ToLowerSymbol(InstrumentId instrument) {
 
 }  // namespace
 
-BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback)
-    : Provider(config, std::move(callback)) {
+BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
+    : Provider(config, std::move(callback), std::move(quote_callback)) {
     std::string symbol = ToLowerSymbol(config.instrument);
     depth_path_ = fmt::format("/ws/{}@depth@100ms", symbol);
     bbo_path_ = fmt::format("/ws/{}@bookTicker", symbol);
@@ -38,8 +38,10 @@ void BinanceProvider::OnDepthMessage(const std::string& message) {
 }
 
 void BinanceProvider::OnBboMessage(const std::string& message) {
-    // TODO: fast-BBO correctness oracle (DESIGN_1 §4.4) not implemented yet -
-    // this parses, but nothing compares it against the depth-derived BBO or
-    // triggers a resync.
-    ParseBinanceBboMessage(message);
+    auto quote = ParseBinanceBboMessage(message, config.venue_id, config.instrument);
+    if (!quote) {
+        return;  // not a bookTicker payload (e.g. a subscribe ack)
+    }
+    quote->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    EmitQuote(*quote);
 }

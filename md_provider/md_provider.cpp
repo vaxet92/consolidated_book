@@ -4,12 +4,13 @@
 
 using namespace market_data;
 
-Provider::Provider(const ProviderConfig& config, CallBack callback)
+Provider::Provider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
     : config(config),
       running(false),
       ssl_ctx(ssl::context::tlsv12_client),
       reconnect_count(0),
-      callback_(std::move(callback)) {
+      callback_(std::move(callback)),
+      quote_callback_(std::move(quote_callback)) {
     // Load root certificates for SSL
     load_root_certificates(ssl_ctx);
     ssl_ctx.set_verify_mode(ssl::verify_peer);
@@ -112,6 +113,12 @@ void Provider::HandleReconnection() {
 void Provider::Emit(const BookUpdate& update) {
     if (callback_) {
         callback_(update);
+    }
+}
+
+void Provider::EmitQuote(const BboQuote& quote) {
+    if (quote_callback_) {
+        quote_callback_(quote);
     }
 }
 

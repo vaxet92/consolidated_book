@@ -68,14 +68,18 @@ grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, cons
 
 void AggregatorServiceImpl::PublishBbo(InstrumentId instrument, const consolidated::BBO& bbo) {
     wire::Update update;
-    update.set_seq(next_seq_.fetch_add(1, std::memory_order_relaxed));
     update.set_server_ts_ns(NowNs());
     update.set_symbol(VenueConverter::ToInstrumentString(instrument));
     update.set_price_scale(kPriceScale);
     update.set_qty_scale(kQtyScale);
     *update.mutable_bbo() = ToWire(bbo);
 
+    // seq is assigned under the same lock that orders the pushes, so a
+    // client can never see seq go backwards. Doing it outside the lock
+    // works today only because Core::ApplyUpdate happens to hold its own
+    // mutex across this callback - an accidental guarantee, not a local one.
     std::lock_guard<std::mutex> lock(sessions_mutex_);
+    update.set_seq(next_seq_.fetch_add(1, std::memory_order_relaxed));
     for (auto& [id, channel] : bbo_sessions_) {
         channel->Push(update);
     }

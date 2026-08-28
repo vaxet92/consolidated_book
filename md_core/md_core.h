@@ -11,6 +11,8 @@
 namespace market_data {
 
 using InstrumentBooks = std::unordered_map<InstrumentId, VenueBookArray>;
+using InstrumentQuotes = std::unordered_map<InstrumentId, VenueQuoteArray>;
+using InstrumentBbo = std::unordered_map<InstrumentId, consolidated::BBO>;
 
 class Core {
    public:
@@ -23,7 +25,16 @@ class Core {
 
     // Fed by whoever owns the Provider(s) (the wiring layer, e.g. main.cpp).
     // Core has no knowledge of providers, sockets, or threads.
+    //
+    // Depth path: maintains the per-venue books. Does NOT publish the BBO -
+    // the fast-BBO stream does that (see ApplyQuote). The books are what
+    // future band math (§8.2/§8.3) will walk.
     void ApplyUpdate(const BookUpdate& update);
+
+    // Fast-BBO path (DESIGN_1 §4.4 option 1) - this is what drives the
+    // published BBO. Never touches VenueBook: the two streams are not
+    // mutually sequenced, so mixing them corrupts the book (§7).
+    void ApplyQuote(const BboQuote& quote);
 
     void Start() {}
     void Stop() {}
@@ -36,15 +47,24 @@ class Core {
     void AddInstrument(InstrumentId instrument, const std::vector<VenueId>& venues);
     void RemoveInstrument(InstrumentId instrument);
 
-    // Interim fix, not the final architecture: guards venue_books_ against
-    // concurrent ApplyUpdate() calls from multiple Provider threads. The
-    // designed fix (DESIGN_1 §7.3) is per-venue SPSC queues drained by one
-    // consolidator thread, with no lock on the book path at all - not built
-    // yet. This mutex is correct but costs contention the real design
-    // wouldn't have; remove it once the SPSC queue replaces this.
+    // Interim fix, not the final architecture: guards venue_books_ and
+    // venue_quotes_ against concurrent ApplyUpdate()/ApplyQuote() calls from
+    // multiple Provider threads. The designed fix (DESIGN_1 §7.3) is
+    // per-venue SPSC queues drained by one consolidator thread, with no lock
+    // on the book path at all - not built yet. This mutex is correct but
+    // costs contention the real design wouldn't have; remove it once the
+    // SPSC queue replaces this.
     std::mutex apply_mutex_;
     BboCallback bbo_callback_;
     InstrumentBooks venue_books_;
+    InstrumentQuotes venue_quotes_;
+
+    // The running consolidated BBO per instrument. This is persistent state,
+    // maintained incrementally by UpdateBBOWithQuote rather than recomputed
+    // from scratch - which is exactly why the oracle test matters: a bug in
+    // the incremental update doesn't fail loudly, it accumulates here
+    // silently across thousands of updates.
+    InstrumentBbo consolidated_bbo_;
 };
 
 }  // namespace market_data

@@ -8,7 +8,7 @@ namespace market_data {
 
 class BybitProvider : public Provider {
    public:
-    explicit BybitProvider(const ProviderConfig& config, CallBack callback);
+    explicit BybitProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback = nullptr);
     ~BybitProvider() override = default;
 
    protected:

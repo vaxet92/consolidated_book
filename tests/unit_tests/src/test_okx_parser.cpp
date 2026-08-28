@@ -38,6 +38,19 @@ constexpr const char* kUpdateMessage = R"({
 
 constexpr const char* kSubscribeAck = R"({"event":"subscribe","arg":{"channel":"books","instId":"BTC-USDT"}})";
 
+// Real bbo-tbt shape: no "action" and no "checksum", unlike the books channel.
+constexpr const char* kBboMessage = R"({
+    "arg": {"channel": "bbo-tbt", "instId": "BTC-USDT"},
+    "data": [
+        {
+            "asks": [["8506.96", "100", "0", "2"]],
+            "bids": [["8446.00", "95", "0", "3"]],
+            "ts": "1597026383085",
+            "seqId": 363996337
+        }
+    ]
+})";
+
 }  // namespace
 
 TEST(OkxParserTest, ParsesSnapshotMessage) {
@@ -77,5 +90,33 @@ TEST(OkxParserTest, IgnoresNonBooksMessages) {
 
 TEST(OkxParserTest, MalformedJsonReturnsNulloptNotACrash) {
     auto update = ParseOkxBooksMessage("{not valid json", VenueId::OKX, InstrumentId::BTCUSDT);
+    EXPECT_FALSE(update.has_value());
+}
+
+TEST(OkxParserTest, ParsesBboTbtMessage) {
+    auto update = ParseOkxBboMessage(kBboMessage, VenueId::OKX, InstrumentId::BTCUSDT);
+
+    ASSERT_TRUE(update.has_value());
+    EXPECT_EQ(update->venue, VenueId::OKX);
+    EXPECT_TRUE(update->is_snapshot);  // bbo-tbt is always a full replacement
+    EXPECT_EQ(update->seq, 363996337u);
+    EXPECT_EQ(update->exch_ts_ns, 1597026383085LL * 1'000'000);
+
+    ASSERT_EQ(update->asks.size(), 1u);
+    EXPECT_EQ(update->asks[0].price, 850696000000ull);  // 8506.96 * 1e8
+    ASSERT_EQ(update->bids.size(), 1u);
+    EXPECT_EQ(update->bids[0].price, 844600000000ull);  // 8446.00 * 1e8
+}
+
+TEST(OkxParserTest, BboIgnoresSubscribeAck) {
+    auto update = ParseOkxBboMessage(kSubscribeAck, VenueId::OKX, InstrumentId::BTCUSDT);
+    EXPECT_FALSE(update.has_value());
+}
+
+// The regression this parser split exists for: a shared parser probing for
+// an absent `action` field left simdjson's lazy iterator at a broken depth,
+// and the next lookup asserted instead of returning an error.
+TEST(OkxParserTest, BboMalformedJsonReturnsNulloptNotACrash) {
+    auto update = ParseOkxBboMessage("{not valid json", VenueId::OKX, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }

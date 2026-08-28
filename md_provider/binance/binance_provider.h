@@ -7,7 +7,7 @@ namespace market_data {
 
 class BinanceProvider : public Provider {
    public:
-    explicit BinanceProvider(const ProviderConfig& config, CallBack callback);
+    explicit BinanceProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback = nullptr);
     ~BinanceProvider() override = default;
 
    protected:

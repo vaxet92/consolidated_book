@@ -8,7 +8,7 @@ namespace market_data {
 
 class OKXProvider : public Provider {
    public:
-    explicit OKXProvider(const ProviderConfig& config, CallBack callback);
+    explicit OKXProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback = nullptr);
     ~OKXProvider() override = default;
 
    protected:

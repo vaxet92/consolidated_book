@@ -24,8 +24,9 @@ struct ProviderConfig {
 class Provider {
    public:
     using CallBack = std::function<void(const BookUpdate&)>;
+    using QuoteCallBack = std::function<void(const BboQuote&)>;
 
-    explicit Provider(const ProviderConfig& config, CallBack callback);
+    explicit Provider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback = nullptr);
     virtual ~Provider();
 
     // Start the provider (in a separate thread)
@@ -44,10 +45,11 @@ class Provider {
     const char* GetHost() const { return config.host.c_str(); }
     const char* GetPort() const { return config.port.c_str(); }
 
-    // Fast-BBO stream: correctness oracle only (DESIGN_1 §4.4) - never
-    // published through the CallBack. The >200ms-disagreement resync check
-    // itself is not implemented yet (TODO) - this only gets the stream
-    // connected and routed so that logic has somewhere to live.
+    // Fast-BBO stream (DESIGN_1 §4.4 option 1): a separate, lower-latency
+    // publishing path, NOT spliced into the depth book - the two streams
+    // are not mutually sequenced, so mixing them corrupts the book (§7).
+    // Binance @bookTicker is real-time; Bybit orderbook.1 and OKX bbo-tbt
+    // are ~10ms, against 100ms-throttled depth.
     virtual void OnBboMessage(const std::string& message) = 0;
     virtual std::string BboSubscriptionMessage() const = 0;
     virtual const char* GetBboPath() const = 0;
@@ -57,6 +59,10 @@ class Provider {
     // of a direct call once providers run concurrently with the
     // consolidator (see our discussion on CallBack being a temporary shape).
     void Emit(const BookUpdate& update);
+
+    // Called by child classes with a top-of-book quote from the fast-BBO
+    // stream. Same threading caveat as Emit().
+    void EmitQuote(const BboQuote& quote);
 
     // Get current timestamp in milliseconds
     static int64_t GetCurrentTimeMs();
@@ -79,6 +85,7 @@ class Provider {
     WebSocketSessionSSLPtr bbo_session_;
     uint32_t reconnect_count;
     CallBack callback_;
+    QuoteCallBack quote_callback_;
 };
 
 }  // namespace market_data

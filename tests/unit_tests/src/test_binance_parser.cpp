@@ -62,9 +62,12 @@ TEST(BinanceParserTest, DepthMalformedJsonReturnsNulloptNotACrash) {
 }
 
 TEST(BinanceParserTest, ParsesBookTickerMessage) {
-    auto quote = ParseBinanceBboMessage(kBboMessage);
+    auto quote = ParseBinanceBboMessage(kBboMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(quote.has_value());
+    EXPECT_EQ(quote->venue, VenueId::BINANCE);
+    EXPECT_EQ(quote->instrument, InstrumentId::BTCUSDT);
+    EXPECT_EQ(quote->seq, 400900217u);           // the `u` field
     EXPECT_EQ(quote->bid_price, 2535190000ull);  // 25.35190000 * 1e8
     EXPECT_EQ(quote->bid_qty, 3121000000ull);    // 31.21000000 * 1e8
     EXPECT_EQ(quote->ask_price, 2536520000ull);  // 25.36520000 * 1e8
@@ -72,6 +75,6 @@ TEST(BinanceParserTest, ParsesBookTickerMessage) {
 }
 
 TEST(BinanceParserTest, IgnoresNonBookTickerMessages) {
-    auto quote = ParseBinanceBboMessage(kNonDepthMessage);
+    auto quote = ParseBinanceBboMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
     EXPECT_FALSE(quote.has_value());
 }
