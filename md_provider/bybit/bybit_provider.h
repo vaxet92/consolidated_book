@@ -22,6 +22,12 @@ class BybitProvider : public Provider {
 
     const char* GetDepthPath() const override { return kByBitPath.data(); }
     const char* GetBboPath() const override { return kByBitPath.data(); }
+
+   private:
+    // Last applied `u` on the depth stream (orderbook.50). Bybit increments
+    // it by exactly 1 per delta, so any other step is a gap. 0 means "no
+    // snapshot yet" - only touched on the io_context thread, so no lock.
+    uint64_t last_depth_u_{};
 };
 
 }  // namespace market_data

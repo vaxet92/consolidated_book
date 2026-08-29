@@ -64,6 +64,41 @@ class Provider {
     // stream. Same threading caveat as Emit().
     void EmitQuote(const BboQuote& quote);
 
+    // Called by a child class when it detects a sequence gap on the depth
+    // stream: the book is now WRONG (DESIGN_1 §4.2 - strictly worse than
+    // stale), and for an in-channel-snapshot venue the only way to get a
+    // fresh snapshot is to re-subscribe. Tears the sessions down so Run()
+    // reconnects.
+    //
+    // Deliberately NOT routed through HandleReconnection(): a gap is a
+    // normal operational event, not a connection failure, so it must not
+    // consume the MAX_RECONNECT_ATTEMPTS budget that permanently stops the
+    // provider.
+    //
+    // Safe to call from inside a message handler (it runs on the io_context
+    // thread; io_context::stop() is safe there).
+    //
+    // NOTE: both sessions share one io_context, so a depth gap also drops
+    // and reconnects this venue's fast-BBO session. Splitting them needs two
+    // io_contexts per provider - not done.
+    void RequestResync();
+
+    // Runs `fn` on this provider's io_context thread. Lets a subclass
+    // marshal work back from a helper thread (e.g. a REST snapshot fetch)
+    // so state touched by message handlers needs no locking.
+    void PostToIoContext(std::function<void()> fn);
+
+    // Called on the worker thread just before (re)creating the sessions, so
+    // a subclass can drop per-connection state - sync progress, sequence
+    // numbers, buffered events. Default: nothing.
+    //
+    // Required for any venue whose stream does NOT re-send a snapshot on
+    // reconnect (Binance): without it, stale sync state survives a resync
+    // and the first event on the new connection looks like a continuity
+    // violation, resyncing forever. Bybit/OKX self-heal via their
+    // in-channel snapshot.
+    virtual void OnReconnect() {}
+
     // Get current timestamp in milliseconds
     static int64_t GetCurrentTimeMs();
 
@@ -77,6 +112,11 @@ class Provider {
     static constexpr uint32_t MAX_RECONNECT_ATTEMPTS = 10;
     static constexpr uint64_t INITIAL_RECONNECT_DELAY_MS = 1000;  // 1 second
     static constexpr uint64_t MAX_RECONNECT_DELAY_MS = 60000;     // 60 seconds
+    // Short, fixed delay after a gap resync - enough to avoid a tight
+    // reconnect loop, short enough that the book is back quickly.
+    // TODO: §4.2 also calls for hysteresis so a flapping feed can't
+    // resync-storm; not implemented.
+    static constexpr uint64_t RESYNC_DELAY_MS = 200;
 
     std::thread worker_thread;
     net::io_context ioc;
@@ -84,6 +124,9 @@ class Provider {
     WebSocketSessionSSLPtr depth_session_;
     WebSocketSessionSSLPtr bbo_session_;
     uint32_t reconnect_count;
+    // Set by RequestResync() from the io_context thread, read by Run() on
+    // the worker thread after ioc.run() returns - hence atomic.
+    std::atomic<bool> resync_requested_{false};
     CallBack callback_;
     QuoteCallBack quote_callback_;
 };

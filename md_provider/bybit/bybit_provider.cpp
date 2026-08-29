@@ -1,5 +1,7 @@
 #include "bybit_provider.h"
 #include "bybit_parser.h"
+#include "continuity.h"
+#include "logger/logger.h"
 #include "types/venue.h"
 #include <fmt/format.h>
 
@@ -23,10 +25,25 @@ void BybitProvider::OnDepthMessage(const std::string& message) {
     if (!update) {
         return;  // not an orderbook message (e.g. subscribe ack, pong)
     }
+
+    switch (CheckBybitContinuity(*update, last_depth_u_)) {
+        case ContinuityAction::kIgnore:
+            return;
+        case ContinuityAction::kGap:
+            // The book is now WRONG, not merely stale (§4.2). Applying this
+            // delta would silently corrupt it, so drop the book and
+            // re-subscribe to get a fresh snapshot.
+            Logger::Log(LogLevel::kWarning, "[BYBIT] depth gap: expected u={}, got {} - resyncing", last_depth_u_ + 1,
+                        update->seq);
+            last_depth_u_ = 0;
+            RequestResync();
+            return;
+        case ContinuityAction::kReset:
+        case ContinuityAction::kApply:
+            break;
+    }
+
     update->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
-    // TODO: gap detection/resync (DESIGN_1 §4.2) not implemented yet -
-    // "type":"snapshot" resets the book but continuity of "delta" messages
-    // via `u`/`seq` is not checked.
     Emit(*update);
 }
 

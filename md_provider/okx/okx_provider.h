@@ -22,6 +22,13 @@ class OKXProvider : public Provider {
 
     const char* GetDepthPath() const override { return kOkxPath.data(); }
     const char* GetBboPath() const override { return kOkxPath.data(); }
+
+   private:
+    // Last applied `seqId` on the depth stream (books). OKX chains messages
+    // by prevSeqId == previous seqId - the ids are NOT contiguous, so a
+    // "+1" check like Bybit's would be wrong here. 0 means "no snapshot
+    // yet"; only touched on the io_context thread, so no lock.
+    uint64_t last_depth_seq_ = 0;
 };
 
 }  // namespace market_data

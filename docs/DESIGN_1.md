@@ -150,11 +150,13 @@ Disconnected → Connecting → Syncing → Live
 | Depth stream | `btcusdt@depth@100ms` | `books` | `orderbook.50.BTCUSDT` |
 | Snapshot | REST `/api/v3/depth` | in-channel snapshot | in-channel snapshot |
 | Continuity | `U <= lastUpdateId+1 <= u`, then `pu` chaining | seq/prevSeq | `u` monotonic, `type=snapshot` resets |
-| Integrity check | — | **CRC32 over top-25** | — |
+| Integrity check | — | ~~CRC32 over top-25~~ **none (deprecated)** | — |
 | Fast BBO | `btcusdt@bookTicker` | `bbo-tbt` | `orderbook.1` |
 | Heartbeat | server ping / 3m | `ping` text / 30s | `{"op":"ping"}` / 20s |
 
-**OKX's CRC32 is worth more than it looks.** It's a free end-to-end validation that our book construction matches the venue's, and it doubles as a property test over recorded data: replay the feed, assert the checksum matches at every checkpoint. If our flat-vector book has an off-by-one anywhere, this catches it.
+**OKX's CRC32 is gone — this section is corrected.** This document originally treated OKX's checksum as free end-to-end validation that our book construction matches the venue's. OKX has since deprecated it: the `checksum` field is still present in `books`, `books-l2-tbt` and `books50-l2-tbt` pushes, but its **value is fixed to 0** and it must not be used for integrity verification. OKX directs users to `seqId`/`prevSeqId` instead, which is what §4.2's sequencing implements.
+
+Consequence worth stating plainly: we are down from three defences against a silently wrong book to two — the fast-BBO oracle (§4.4) and the `std::map` test oracle (§5.1). Neither is a per-message check against the venue's own view of the book, which the checksum was, and no other venue offers one either. That makes the fast-BBO oracle the only *live* cross-check available and correspondingly more valuable than when this document was written.
 
 ### 4.4 Combining fast-BBO and depth streams
 
@@ -393,7 +395,7 @@ Test coverage is an explicit assessment criterion, and `md_core`'s I/O-free desi
 | Unit | Flat-vector book vs. `std::map` oracle: insert/update/delete/cross, top-of-book maintenance |
 | Unit | Band math against hand-computed golden cases, including exhausted depth, single-level fill, crossed book, zero-liquidity side |
 | Unit | Sequencing state machine per venue: gap, out-of-order, duplicate, snapshot-during-live, reconnect mid-sync |
-| Property | Replay a recorded OKX capture, assert our CRC32 matches the venue's at every checkpoint |
+| Unit | Per-venue sequencing rules: Bybit u+1 / restart, OKX prevSeqId chaining incl. keep-alive and maintenance reset, Binance snapshot reconciliation (`test_continuity.cpp`) |
 | Property | Randomized delta streams: consolidated total qty at price == Σ per-venue qty, invariant after every update |
 | Staleness | Synthetic replay with injected per-venue delays; assert admission/exclusion and hysteresis behave as specified |
 | Concurrency | Seqlock under TSan: writer + readers, assert no torn reads and bounded retry |
@@ -439,7 +441,7 @@ Not pursued in v1, documented as future work with rationale: tick-indexed ladder
 |---|---|
 | Exchange geo-blocking or rate limits during review | replay profile in compose; capture files committed |
 | Venue API changes mid-assignment | adapters isolated behind one interface; contract tests on captures |
-| Subtle book desync going unnoticed | OKX CRC32 invariant + fast-BBO oracle + `std::map` test oracle |
+| Subtle book desync going unnoticed | fast-BBO oracle + `std::map` test oracle + per-venue sequence-gap detection → resync. **Weaker than originally planned**: OKX deprecated its CRC32 (§4.3), so no venue offers a per-message check against its own book. Gap detection catches *missed* messages, not *misapplied* ones. |
 | Optimization work crowding out correctness and docs | optimization is a fixed, time-boxed phase after a green end-to-end slice |
 | Band definitions differing from the assessor's intent | both interpretations documented; reference point config-flagged; asked as a clarifying question |
 

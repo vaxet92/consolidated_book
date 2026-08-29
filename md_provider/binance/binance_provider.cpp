@@ -1,9 +1,14 @@
 #include "binance_provider.h"
 #include "binance_parser.h"
+#include "binance_rest.h"
+#include "continuity.h"
+#include "logger/logger.h"
 #include "types/venue.h"
 #include <fmt/format.h>
 #include <algorithm>
 #include <cctype>
+#include <thread>
+#include <utility>
 
 using namespace market_data;
 
@@ -16,6 +21,10 @@ std::string ToLowerSymbol(InstrumentId instrument) {
     return symbol;
 }
 
+std::string UpperSymbol(InstrumentId instrument) {
+    return VenueConverter::ToInstrumentString(instrument);
+}
+
 }  // namespace
 
 BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
@@ -25,15 +34,120 @@ BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback
     bbo_path_ = fmt::format("/ws/{}@bookTicker", symbol);
 }
 
+void BinanceProvider::OnReconnect() {
+    // Per-connection state only. Binance never re-sends a snapshot on the
+    // stream, so without this a resync would leave us in kLive with a stale
+    // last_depth_u_ and resync forever.
+    sync_state_ = SyncState::kSyncing;
+    snapshot_requested_ = false;
+    snapshot_attempts_ = 0;
+    pending_.clear();
+    last_depth_u_ = 0;
+}
+
+void BinanceProvider::FetchSnapshotAsync() {
+    snapshot_requested_ = true;
+    ++snapshot_attempts_;
+
+    std::string target = fmt::format("/api/v3/depth?symbol={}&limit=1000", UpperSymbol(config.instrument));
+    std::string host(kBinanceRestHost);
+    std::string port(kBinanceRestPort);
+    VenueId venue = config.venue_id;
+    InstrumentId instrument = config.instrument;
+
+    // Detached thread: HttpsGet blocks, and doing that on the io_context
+    // thread would stall the read loop that is currently buffering events.
+    std::thread([this, host, port, target, venue, instrument]() {
+        auto body = HttpsGet(host, port, target);
+        auto snapshot = body ? ParseBinanceDepthSnapshot(*body, venue, instrument) : std::nullopt;
+
+        // Back onto the io_context thread - everything below touches state
+        // shared with the message handlers.
+        PostToIoContext([this, snapshot = std::move(snapshot)]() mutable {
+            if (!snapshot) {
+                Logger::Log(LogLevel::kError, "[BINANCE] depth snapshot fetch failed");
+                if (snapshot_attempts_ >= kMaxSnapshotAttempts) {
+                    RequestResync();
+                    return;
+                }
+                FetchSnapshotAsync();
+                return;
+            }
+
+            if (!ReconcileSnapshot(std::move(*snapshot))) {
+                // Snapshot predates our buffered events - it cannot be
+                // joined onto them. Refetch a newer one.
+                if (snapshot_attempts_ >= kMaxSnapshotAttempts) {
+                    Logger::Log(LogLevel::kError, "[BINANCE] snapshot never caught up after {} attempts - resyncing",
+                                snapshot_attempts_);
+                    RequestResync();
+                    return;
+                }
+                Logger::Log(LogLevel::kWarning, "[BINANCE] snapshot too old to join buffered events - refetching");
+                FetchSnapshotAsync();
+            }
+        });
+    }).detach();
+}
+
+bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
+    const uint64_t last_update_id = snapshot.seq;
+
+    // Which buffered event (if any) joins onto this snapshot. nullopt means
+    // the snapshot predates the buffer and cannot be joined - refetch.
+    auto first = ReconcileBinanceSnapshot(last_update_id, pending_);
+    if (!first) {
+        return false;
+    }
+
+    snapshot.recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    Emit(snapshot);
+    last_depth_u_ = last_update_id;
+
+    for (size_t i = *first; i < pending_.size(); ++i) {
+        Emit(pending_[i]);
+        last_depth_u_ = pending_[i].seq;
+    }
+    pending_.clear();
+
+    sync_state_ = SyncState::kLive;
+    Logger::Log(LogLevel::kInfo, "[BINANCE] depth synced at lastUpdateId={}, now live", last_update_id);
+    return true;
+}
+
 void BinanceProvider::OnDepthMessage(const std::string& message) {
     auto update = ParseBinanceDepthMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a depth update (e.g. a control/ack message)
     }
     update->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
-    // TODO: gap detection/resync (DESIGN_1 §4.2) not implemented yet -
-    // every message is applied as a plain delta, snapshot sync (REST
-    // /api/v3/depth) is not done.
+
+    if (sync_state_ == SyncState::kSyncing) {
+        // Subscribe-and-buffer FIRST, snapshot second (§4.2). The fetch is
+        // kicked off from here - the first event proves the stream is
+        // actually delivering, and Provider has no "connected" hook.
+        if (!snapshot_requested_) {
+            FetchSnapshotAsync();
+        }
+        if (pending_.size() >= kMaxPendingEvents) {
+            Logger::Log(LogLevel::kError, "[BINANCE] buffered {} events without a snapshot - resyncing",
+                        pending_.size());
+            RequestResync();
+            return;
+        }
+        pending_.push_back(std::move(*update));
+        return;
+    }
+
+    // Live: each event must continue the chain, U == last_u + 1 (§4.3).
+    // Binance never sends a snapshot on the stream, so kReset/kIgnore
+    // cannot occur here - only kApply or kGap.
+    if (CheckBinanceContinuity(*update, last_depth_u_) == ContinuityAction::kGap) {
+        Logger::Log(LogLevel::kWarning, "[BINANCE] depth gap: expected U={}, got {} - resyncing", last_depth_u_ + 1,
+                    update->prev_seq);
+        RequestResync();
+        return;
+    }
     Emit(*update);
 }
 

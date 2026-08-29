@@ -8,9 +8,11 @@ find_package(simdjson CONFIG REQUIRED)
 
 add_library(md_provider STATIC
     md_provider.cpp
+    continuity.cpp
     ws/ws.cpp
     binance/binance_provider.cpp
     binance/binance_parser.cpp
+    binance/binance_rest.cpp
     bybit/bybit_provider.cpp
     bybit/bybit_parser.cpp
     okx/okx_provider.cpp

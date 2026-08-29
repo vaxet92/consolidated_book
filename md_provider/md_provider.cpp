@@ -54,6 +54,10 @@ void Provider::Stop() {
 void Provider::Run() {
     while (running) {
         try {
+            // Let the subclass drop per-connection state before the new
+            // sessions start delivering messages.
+            OnReconnect();
+
             // Reset io_context for a new run
             ioc.restart();
 
@@ -75,8 +79,17 @@ void Provider::Run() {
             ioc.run();
 
             if (running) {
-                // Connection dropped, attempt reconnection
-                HandleReconnection();
+                if (resync_requested_.exchange(false)) {
+                    // Deliberate resync after a depth gap - NOT a connection
+                    // failure, so it must not consume the reconnect-attempt
+                    // budget that permanently stops the provider.
+                    Logger::Log(LogLevel::kInfo, "[{}] Resyncing after depth gap",
+                                VenueConverter::ToVenueString(config.venue_id));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(RESYNC_DELAY_MS));
+                } else {
+                    // Connection dropped, attempt reconnection
+                    HandleReconnection();
+                }
             }
 
         } catch (const std::exception& e) {
@@ -120,6 +133,21 @@ void Provider::EmitQuote(const BboQuote& quote) {
     if (quote_callback_) {
         quote_callback_(quote);
     }
+}
+
+void Provider::PostToIoContext(std::function<void()> fn) {
+    net::post(ioc, std::move(fn));
+}
+
+void Provider::RequestResync() {
+    resync_requested_ = true;
+    if (depth_session_) {
+        depth_session_->Stop();
+    }
+    if (bbo_session_) {
+        bbo_session_->Stop();
+    }
+    ioc.stop();
 }
 
 int64_t Provider::GetCurrentTimeMs() {

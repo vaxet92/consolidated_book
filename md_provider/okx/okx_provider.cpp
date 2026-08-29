@@ -1,5 +1,7 @@
 #include "okx_provider.h"
 #include "okx_parser.h"
+#include "continuity.h"
+#include "logger/logger.h"
 #include "types/venue.h"
 #include <fmt/format.h>
 
@@ -39,11 +41,24 @@ void OKXProvider::OnDepthMessage(const std::string& message) {
     if (!update) {
         return;  // not a books update (e.g. subscribe ack, pong)
     }
+
+    switch (CheckOkxContinuity(*update, last_depth_seq_)) {
+        case ContinuityAction::kIgnore:
+            return;
+        case ContinuityAction::kGap:
+            // Chain broken: the book is WRONG, not merely stale (§4.2).
+            Logger::Log(LogLevel::kWarning, "[OKX] depth gap: expected prevSeqId={}, got {} - resyncing",
+                        last_depth_seq_, update->prev_seq);
+            last_depth_seq_ = 0;
+            RequestResync();
+            return;
+        case ContinuityAction::kReset:
+        case ContinuityAction::kApply:
+            break;
+    }
+
     update->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
-    // TODO: gap detection/resync (DESIGN_1 §4.2) not implemented yet -
-    // "action":"snapshot" resets the book but continuity via seqId is not
-    // checked, and the CRC32 checksum (§4.3's free end-to-end validation)
-    // is not verified.
+
     Emit(*update);
 }
 

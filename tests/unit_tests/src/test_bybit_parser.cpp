@@ -38,6 +38,22 @@ constexpr const char* kDeltaMessage = R"({
 
 constexpr const char* kSubscribeAck = R"({"success":true,"ret_msg":"","op":"subscribe","conn_id":"abc"})";
 
+// Bybit sends u == 1 after a service restart. The payload still says
+// "type":"delta", but it is fresh snapshot data.
+constexpr const char* kRestartMessage = R"({
+    "topic": "orderbook.50.BTCUSDT",
+    "type": "delta",
+    "ts": 1672304485200,
+    "data": {
+        "s": "BTCUSDT",
+        "b": [["16490.00", "1.5"]],
+        "a": [["16495.00", "2.5"]],
+        "u": 1,
+        "seq": 7961638800
+    },
+    "cts": 1672304485198
+})";
+
 }  // namespace
 
 TEST(BybitParserTest, ParsesSnapshotMessage) {
@@ -68,6 +84,18 @@ TEST(BybitParserTest, ParsesDeltaMessageAsNonSnapshot) {
     // VenueBook is what interprets qty==0 as a removal.
     ASSERT_EQ(update->bids.size(), 1u);
     EXPECT_EQ(update->bids[0].qty, 0u);
+}
+
+// u == 1 means Bybit restarted its service, so this is fresh snapshot data
+// even though "type" says "delta". Normalising it here - rather than in the
+// sequencing layer - is what keeps venue quirks out of continuity.h.
+// Missing it would merge a brand-new book into a stale one.
+TEST(BybitParserTest, UpdateIdOneIsNormalisedToSnapshot) {
+    auto update = ParseBybitOrderbookMessage(kRestartMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
+
+    ASSERT_TRUE(update.has_value());
+    EXPECT_TRUE(update->is_snapshot) << R"(u == 1 must be treated as a snapshot despite "type":"delta")";
+    EXPECT_EQ(update->seq, 1u);
 }
 
 TEST(BybitParserTest, IgnoresNonOrderbookMessages) {

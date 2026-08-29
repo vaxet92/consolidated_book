@@ -57,7 +57,8 @@ std::optional<BookUpdate> ParseOkxBooksMessage(const std::string& message, Venue
             update.is_snapshot = is_snapshot;
 
             // Read in real document order: asks, bids, ts, checksum
-            // (skipped), seqId.
+            // (skipped), prevSeqId, seqId. prevSeqId MUST be read before
+            // seqId - simdjson on-demand is forward-only.
             auto asks_result = entry["asks"].get_array();
             if (!asks_result.error()) {
                 AppendLevels(asks_result.value(), update.asks);
@@ -69,6 +70,11 @@ std::optional<BookUpdate> ParseOkxBooksMessage(const std::string& message, Venue
 
             auto ts_result = entry["ts"].get_string();  // OKX sends ts as a string
             update.exch_ts_ns = ts_result.error() ? 0 : ParseScaledDecimal(ts_result.value(), 0) * 1'000'000;
+
+            // -1 on a snapshot; on an update it is the seqId this message
+            // follows, which is what the continuity chain is checked against.
+            auto prev_seq_result = entry["prevSeqId"].get_int64();
+            update.prev_seq = prev_seq_result.error() ? 0 : prev_seq_result.value();
 
             auto seq_result = entry["seqId"].get_int64();
             update.seq = seq_result.error() ? 0 : static_cast<uint64_t>(seq_result.value());

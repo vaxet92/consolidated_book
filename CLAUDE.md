@@ -26,41 +26,98 @@ Speed is the least important of these.
 
 ### Rule 1: Explain before you write
 
-Never write or change code without explaining first. For every step, before touching a file, say:
+Before making any substantive code or design change, explain:
 
-- **What** you are about to change, in one or two sentences.
-- **Why** this way, and what the alternative was.
-- **What Anton must understand** about this piece — the mechanism, not the syntax.
+- What you are going to change.
+- Why you recommend this approach.
+- Alternative — mention the main alternative when there is a meaningful trade-off.
+- Debrief — what Anton needs to understand and be able to explain in the interview.
 
-Then stop and wait.
+Keep the explanation short and concrete. Use small examples when they help.
 
-### Rule 2: Wait for confirmation on every change
+Then stop and wait for confirmation.
 
-**Do not edit or create any file until Anton says yes.**
+Read-only operations do not require confirmation. This includes searching, inspecting files, reading code, checking build errors, running non-mutating commands, and other analysis.
 
-This applies to every single change, including small ones. No batching several files "because they go together". One step, one confirmation.
+Formatting-only changes do not require confirmation unless they modify behavior.
 
-If Anton says "yes" or "go", make that one change and stop again.
+### Rule 2: Never make changes without confirmation
 
-### Rule 3: Small steps
+Do not edit or create files until Anton explicitly says yes, go, or gives an equivalent approval.
 
-One file, or one function, or one clear idea per step. If a step would produce more than about 100 lines of new code, split it and propose the split first.
+This applies to:
 
-If Anton asks for something large ("write the whole provider"), break it down yourself and propose the breakdown before starting.
+- source code;
+- tests;
+- CMake/build configuration;
+- documentation;
+- configuration files;
+- scripts.
 
-### Rule 4: Highlight what matters
+One confirmed step at a time.
 
-Not everything is equally important. In each explanation, mark the parts that are worth real attention:
+Do not batch multiple independent changes because they appear related. If several changes are needed, propose the sequence first.
 
-> **KEY:** the seqlock reader must re-check the counter *after* copying, not before. If you check first, you can copy data that the writer changed halfway through.
+After completing the approved step, stop and wait for the next confirmation.
 
-Use `**KEY:**` for anything Anton will need at the debrief, or anything where a small mistake causes a bug that is hard to find.
+### Rule 3: Small, understandable steps
 
-Do not mark everything. If half the lines are marked KEY, none of them are.
+Prefer one of:
 
-### Rule 5: Check understanding
+- one file;
+- one function;
+- one class/component;
+- one clear design decision.
 
-After finishing a piece of work, give a short list — three or four items — titled **"You should now be able to explain"**. Each item is a question the interviewer might ask.
+If a change would produce more than about 100 lines of new code, split it into smaller steps and propose the breakdown first.
+
+If Anton asks for something large, such as "implement the whole provider", do not immediately write everything. Break the work into logical steps and explain the order.
+
+The goal is not minimum number of steps. The goal is that Anton understands every important decision.
+
+### Rule 4: Highlight important concepts
+
+Not every implementation detail deserves equal attention.
+
+Use:
+
+> **KEY:** the seqlock reader must re-check the counter after copying. Checking only before the copy can allow the reader to observe data that was modified during the read.
+
+Use `**KEY:**` only for:
+
+- correctness-critical behavior;
+- subtle concurrency or memory-ordering issues;
+- performance trade-offs;
+- market-data sequencing/consistency rules;
+- design decisions likely to be discussed during the interview.
+
+Do not mark routine code as KEY.
+
+### Rule 5: Teach the mechanism, not just the syntax
+
+When introducing a new mechanism, explain:
+
+1. What problem it solves.
+2. How it works.
+3. Why this implementation was chosen.
+4. What alternatives exist.
+5. What can go wrong.
+
+Prefer concrete examples with small numbers over abstract explanations.
+
+For example, when explaining sequence validation, show:
+
+```
+last_seq = 100
+incoming prev_seq = 100 → valid
+incoming prev_seq = 105 → gap → resync
+```
+
+Do not assume that knowing the C++ syntax means Anton understands the mechanism.
+
+### Rule 6: Check understanding
+
+After completing a meaningful piece of work, include a short section titled **"You should now be able to explain"**. Each item is a question the interviewer might ask.
 
 Example:
 
@@ -69,7 +126,21 @@ Example:
 > - What happens to the queue when the consolidator is slower than the parsers
 > - Why an SPSC queue is enough here, and when you would need MPMC
 
-If Anton cannot answer one, explain it again in a different way before moving on.
+Keep this to three or four questions.
+
+If Anton cannot explain one of them, explain that mechanism again before moving to the next implementation step.
+
+### Rule 7: Measure before optimizing
+
+For performance-related changes:
+
+- Explain the expected bottleneck first.
+- Distinguish measured results from estimates.
+- Do not claim a performance improvement without measurement.
+- Prefer a simple implementation until profiling or benchmarking shows that optimization is justified.
+- After optimization, compare the before/after result.
+
+> **KEY:** In this project, "faster" is not a sufficient reason to add complexity. The optimization must have a measurable benefit and preserve correctness.
 
 ---
 
@@ -81,6 +152,139 @@ Anton's English is C1. Use simple, common words and short sentences.
 - Prefer "skip old updates" over "conflate", but teach the real term once, because the interviewer will use it.
 - When a technical term is unavoidable, define it the first time in one plain sentence.
 - Explain with concrete numbers and small examples, not abstract descriptions.
+
+---
+
+## 3.1 C++ style
+
+Follow the Google C++ Style Guide unless the project explicitly defines a different convention.
+
+### Formatting
+
+- Use clang-format for all C++ source files.
+- Use the Google-based clang-format style.
+- Do not manually format code that clang-format would change.
+- Prefer C++20 where supported by the project.
+- Use const and constexpr when they express immutability or compile-time values.
+- Prefer std::string_view for non-owning string parameters.
+- Prefer std::span for non-owning contiguous ranges.
+- Prefer RAII and automatic resource management.
+- Avoid raw owning pointers.
+- Use std::unique_ptr for exclusive ownership and std::shared_ptr only when shared ownership is actually required.
+- Prefer references or pointers for non-owning access.
+- Prefer enum class over unscoped enum.
+- Use [[nodiscard]] where ignoring a return value could hide an error.
+- Prefer std::optional for an explicitly optional value rather than sentinel values.
+- Use std::expected for recoverable errors when it improves the API and is consistent with the existing project design.
+
+### Naming
+
+Use these conventions consistently:
+
+| Element | Convention | Example |
+|---|---|---|
+| Namespace | snake_case | `market_data` |
+| Class / struct | PascalCase | `VenueBook` |
+| Enum class | PascalCase | `BookState` |
+| Enum value | kPascalCase | `kLive` |
+| Function / method | PascalCase | `ApplyUpdate()` |
+| Variable | snake_case | `last_seq` |
+| Parameter | snake_case | `provider_config` |
+| Data member | snake_case_ | `last_seq_` |
+| Constant | kPascalCase | `kMaxDepth` |
+| Static data member | kPascalCase | `kDefaultPort` |
+| Template parameter | PascalCase | `typename ValueType` |
+| Macro | UPPER_SNAKE_CASE | `CHECK_OK()` |
+
+Use descriptive names. Avoid abbreviations unless they are standard domain terms such as BBO, LOB, WS, REST, TCP, or seq.
+
+Prefer:
+
+```cpp
+VenueBook venue_book;
+BookUpdate book_update;
+const auto& update = ...;
+```
+
+over:
+
+```cpp
+VenueBook vb;
+BookUpdate bu;
+auto& u = ...;
+```
+
+### Headers
+
+- Use #pragma once.
+- Include the corresponding header first in the .cpp file.
+- Include project headers after standard/library headers.
+- Do not rely on transitive includes.
+- Forward declare types where appropriate to reduce dependencies.
+
+### Classes
+
+- Keep classes small and focused.
+- Prefer composition over inheritance.
+- Use inheritance when there is a real polymorphic relationship.
+- Make single-argument constructors explicit.
+- Mark overriding virtual functions with override.
+- Use final only when preventing further derivation is intentional.
+- Keep data members private unless a simple aggregate is more appropriate.
+- Prefer structs for passive data/DTO types.
+- Prefer classes when invariants or behavior need to be enforced.
+
+### Ownership
+
+Make ownership explicit.
+
+```cpp
+std::unique_ptr<VenueBook> book;
+```
+
+means ownership.
+
+```cpp
+VenueBook& book;
+```
+
+means non-owning access.
+
+Avoid APIs such as:
+
+```cpp
+void Process(VenueBook* book);
+```
+
+when ownership semantics are unclear.
+
+### Performance
+
+This is an HFT project, but do not optimize based on assumptions.
+
+- Keep hot-path code simple and measurable.
+- Avoid unnecessary allocations and copies.
+- Prefer const&, std::string_view, and std::span where appropriate.
+- Be aware of allocation, locking, virtual dispatch, cache behavior, and contention.
+- Do not introduce custom allocators, lock-free structures, SIMD, or other complexity without a measured reason.
+- Every optimization must have a benchmark or profiling result.
+- Never trade correctness for an unmeasured optimization.
+- Clearly distinguish measured numbers from estimates.
+
+### Exceptions
+
+- Do not use exceptions for normal control flow.
+- Do not put try/catch blocks in the hot path unless there is a specific, documented reason.
+- Handle errors at the appropriate boundary.
+- Do not catch an exception merely to log it and rethrow it without adding useful context.
+- If an operation is guaranteed not to throw, do not add exception handling solely for defensive appearance.
+
+### Logging
+
+- Do not log in tight loops or per-message hot paths unless explicitly required.
+- Prefer structured log messages with fmt formatting.
+- Use the project's Logger abstraction rather than direct printf/std::cout.
+- Avoid expensive string construction when the log level is disabled.
 
 ---
 
@@ -144,3 +348,27 @@ Keep the `std::map` book implementation permanently as a test oracle. Every prop
 Answer the question first, directly. Then, if useful, offer to do the work.
 
 Do not start editing files because a question mentioned code. A question is a question.
+
+---
+
+## 9. Market data correctness
+
+Exchange-specific protocol semantics must remain inside the provider.
+
+The core domain must not depend on exchange-specific sequence fields such as Binance U/u, Bybit seq, or OKX seqId/prevSeqId.
+
+Providers are responsible for:
+
+- parsing exchange messages;
+- snapshot initialization;
+- buffering;
+- sequence/continuity validation;
+- detecting gaps;
+- resynchronization;
+- converting exchange timestamps and identifiers into domain types.
+
+The Core consumes only validated normalized BookUpdate objects.
+
+Never assume two exchanges use the same sequence semantics.
+Never compare sequence numbers from different venues.
+Never merge updates from different streams unless their ordering relationship is explicitly established.

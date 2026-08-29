@@ -25,6 +25,12 @@ inline constexpr std::array<VenueId, static_cast<size_t>(VenueId::COUNT)> VenueI
 
 inline constexpr std::string_view kBinanceHost = "stream.binance.com";
 inline constexpr std::string_view kBinancePort = "9443";
+// Binance's REST API is a different host/port from its WS stream. Only
+// Binance needs REST at all - its depth stream is differential-only, so the
+// book must be seeded from GET /api/v3/depth (DESIGN_1 §4.3). Bybit and OKX
+// send an in-channel snapshot instead.
+inline constexpr std::string_view kBinanceRestHost = "api.binance.com";
+inline constexpr std::string_view kBinanceRestPort = "443";
 
 inline constexpr std::string_view kBybitHost = "stream.bybit.com";
 inline constexpr std::string_view kBybitPort = "443";

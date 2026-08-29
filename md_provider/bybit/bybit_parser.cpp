@@ -61,6 +61,12 @@ std::optional<BookUpdate> ParseBybitOrderbookMessage(const std::string& message,
         auto seq_result = data["u"].get_uint64();
         update.seq = seq_result.error() ? 0 : seq_result.value();
 
+        // u == 1 means Bybit restarted its service and this is fresh
+        // snapshot data even though `type` still says "delta". That is a
+        // statement about WHAT this message is, so it is normalised here
+        // rather than left for the sequencing layer to remember.
+        update.is_snapshot = is_snapshot || update.seq == 1;
+
         auto bids_result = data["b"].get_array();
         if (!bids_result.error()) {
             AppendLevels(bids_result.value(), update.bids);

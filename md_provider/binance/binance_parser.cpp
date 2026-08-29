@@ -45,6 +45,11 @@ std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, V
         auto event_ts_result = doc["E"].get_int64();
         update.exch_ts_ns = event_ts_result.error() ? 0 : event_ts_result.value() * 1'000'000;
 
+        // Wire order is e, E, s, U, u, b, a - so U must be read before u to
+        // stay forward-only.
+        auto first_id_result = doc["U"].get_uint64();
+        update.prev_seq = first_id_result.error() ? 0 : static_cast<int64_t>(first_id_result.value());
+
         auto final_id_result = doc["u"].get_uint64();
         update.seq = final_id_result.error() ? 0 : final_id_result.value();
 
@@ -53,6 +58,45 @@ std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, V
             AppendLevels(bids_result.value(), update.bids);
         }
         auto asks_result = doc["a"].get_array();
+        if (!asks_result.error()) {
+            AppendLevels(asks_result.value(), update.asks);
+        }
+
+        return update;
+
+    } catch (const simdjson_error&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<BookUpdate> ParseBinanceDepthSnapshot(const std::string& body, VenueId venue,
+                                                     InstrumentId instrument) {
+    try {
+        ondemand::parser parser;
+        padded_string json(body);
+        ondemand::document doc = parser.iterate(json);
+
+        // Wire order is lastUpdateId, bids, asks. lastUpdateId is also the
+        // gate: an error response ({"code":..,"msg":..}) has no such field.
+        auto last_update_id_result = doc["lastUpdateId"].get_uint64();
+        if (last_update_id_result.error()) {
+            return std::nullopt;
+        }
+
+        BookUpdate update{};
+        update.venue = venue;
+        update.instrument = instrument;
+        update.is_snapshot = true;
+        update.seq = last_update_id_result.value();
+        // A REST snapshot has no predecessor and no exchange timestamp.
+        update.prev_seq = 0;
+        update.exch_ts_ns = 0;
+
+        auto bids_result = doc["bids"].get_array();
+        if (!bids_result.error()) {
+            AppendLevels(bids_result.value(), update.bids);
+        }
+        auto asks_result = doc["asks"].get_array();
         if (!asks_result.error()) {
             AppendLevels(asks_result.value(), update.asks);
         }

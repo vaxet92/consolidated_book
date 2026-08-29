@@ -26,7 +26,12 @@ struct PriceLevel {
 struct BookUpdate {
     VenueId venue;
     InstrumentId instrument;
-    uint64_t seq;        // venue-native monotonic sequence number
+    uint64_t seq;  // venue-native monotonic sequence number
+    // Venue-specific continuity field: the sequence this update claims to
+    // follow. OKX `prevSeqId` (-1 on a snapshot), Binance `U` (first update
+    // id in the event). 0 when the venue has no such field - Bybit chains
+    // by u+1 instead. Signed because OKX uses -1.
+    int64_t prev_seq = 0;
     int64_t recv_ts_ns;  // CLOCK_MONOTONIC, ours. Signed: used in drift subtraction.
     int64_t exch_ts_ns;  // venue's own timestamp - drift estimation only, never compared across venues.
     bool is_snapshot;    // true = full replace, false = incremental delta
