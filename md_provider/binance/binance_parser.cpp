@@ -25,8 +25,7 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
 
 }  // namespace
 
-std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, VenueId venue,
-                                                    InstrumentId instrument) {
+std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, VenueId venue, InstrumentId instrument) {
     try {
         ondemand::parser parser;
         padded_string json(message);
@@ -69,8 +68,7 @@ std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, V
     }
 }
 
-std::optional<BookUpdate> ParseBinanceDepthSnapshot(const std::string& body, VenueId venue,
-                                                     InstrumentId instrument) {
+std::optional<BookUpdate> ParseBinanceDepthSnapshot(const std::string& body, VenueId venue, InstrumentId instrument) {
     try {
         ondemand::parser parser;
         padded_string json(body);

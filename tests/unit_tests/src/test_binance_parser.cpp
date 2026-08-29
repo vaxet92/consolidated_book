@@ -43,12 +43,12 @@ TEST(BinanceParserTest, ParsesDepthUpdateMessage) {
     EXPECT_EQ(update->exch_ts_ns, 1672515782136LL * 1'000'000);
 
     ASSERT_EQ(update->bids.size(), 1u);
-    EXPECT_EQ(update->bids[0].price, 240000ull);       // 0.0024 * 1e8
-    EXPECT_EQ(update->bids[0].qty, 1000000000ull);     // 10 * 1e8
+    EXPECT_EQ(update->bids[0].price, 240000ull);    // 0.0024 * 1e8
+    EXPECT_EQ(update->bids[0].qty, 1000000000ull);  // 10 * 1e8
 
     ASSERT_EQ(update->asks.size(), 1u);
-    EXPECT_EQ(update->asks[0].price, 260000ull);       // 0.0026 * 1e8
-    EXPECT_EQ(update->asks[0].qty, 10000000000ull);    // 100 * 1e8
+    EXPECT_EQ(update->asks[0].price, 260000ull);     // 0.0026 * 1e8
+    EXPECT_EQ(update->asks[0].qty, 10000000000ull);  // 100 * 1e8
 }
 
 TEST(BinanceParserTest, IgnoresNonDepthUpdateMessages) {

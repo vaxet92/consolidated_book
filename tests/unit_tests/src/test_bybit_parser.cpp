@@ -68,7 +68,7 @@ TEST(BybitParserTest, ParsesSnapshotMessage) {
 
     ASSERT_EQ(update->bids.size(), 2u);
     EXPECT_EQ(update->bids[0].price, 1649350000000ull);  // 16493.50 * 1e8
-    EXPECT_EQ(update->bids[0].qty, 600000ull);            // 0.006 * 1e8
+    EXPECT_EQ(update->bids[0].qty, 600000ull);           // 0.006 * 1e8
 
     ASSERT_EQ(update->asks.size(), 2u);
     EXPECT_EQ(update->asks[0].price, 1649700000000ull);  // 16497.00 * 1e8

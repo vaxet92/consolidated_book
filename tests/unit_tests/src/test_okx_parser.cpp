@@ -66,11 +66,11 @@ TEST(OkxParserTest, ParsesSnapshotMessage) {
     // 4-element levels [price, qty, deprecated, numOrders] - only first two matter.
     ASSERT_EQ(update->asks.size(), 1u);
     EXPECT_EQ(update->asks[0].price, 847698000000ull);  // 8476.98 * 1e8
-    EXPECT_EQ(update->asks[0].qty, 41500000000ull);      // 415 * 1e8
+    EXPECT_EQ(update->asks[0].qty, 41500000000ull);     // 415 * 1e8
 
     ASSERT_EQ(update->bids.size(), 1u);
     EXPECT_EQ(update->bids[0].price, 847697000000ull);  // 8476.97 * 1e8
-    EXPECT_EQ(update->bids[0].qty, 25600000000ull);      // 256 * 1e8
+    EXPECT_EQ(update->bids[0].qty, 25600000000ull);     // 256 * 1e8
 }
 
 TEST(OkxParserTest, ParsesUpdateMessageAsNonSnapshot) {

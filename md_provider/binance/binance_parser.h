@@ -13,8 +13,7 @@ namespace market_data {
 // and the continuity chain both need it. Returns std::nullopt for non-depth
 // messages (subscribe acks). Never throws - malformed JSON also becomes
 // std::nullopt.
-std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, VenueId venue,
-                                                    InstrumentId instrument);
+std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, VenueId venue, InstrumentId instrument);
 
 // Parses the REST depth snapshot body from GET /api/v3/depth:
 // {"lastUpdateId": N, "bids": [[px,qty],...], "asks": [[px,qty],...]}

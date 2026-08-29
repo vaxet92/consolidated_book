@@ -19,6 +19,6 @@ namespace market_data {
 // normal error), not just misparse. test_bybit_parser.cpp pins this down
 // against a real sample payload.
 std::optional<BookUpdate> ParseBybitOrderbookMessage(const std::string& message, VenueId venue,
-                                                      InstrumentId instrument);
+                                                     InstrumentId instrument);
 
 }  // namespace market_data

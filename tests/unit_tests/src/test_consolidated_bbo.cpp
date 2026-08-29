@@ -45,8 +45,7 @@ void Apply(VenueQuoteArray& quotes, consolidated::BBO& bbo, const BboQuote& quot
 // appends in venue-index order. The sets must match, the order need not -
 // so compare sorted copies. Comparing only .size() would miss a
 // wrong-venue or swapped-qty bug.
-void ExpectSameVenues(const std::vector<consolidated::VenueQuote>& a,
-                      const std::vector<consolidated::VenueQuote>& b) {
+void ExpectSameVenues(const std::vector<consolidated::VenueQuote>& a, const std::vector<consolidated::VenueQuote>& b) {
     auto sorted_a = a;
     auto sorted_b = b;
     auto by_venue = [](const consolidated::VenueQuote& l, const consolidated::VenueQuote& r) {

@@ -71,4 +71,4 @@ void PrintHelper::Book(const VenueBook& book) {
         Level("BID", PriceLevel{price, qty});
     }
 }
-}
+}  // namespace market_data

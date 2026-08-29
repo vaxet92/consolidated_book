@@ -1,0 +1,26 @@
+name: clang-format
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  clang-format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned version: clang-format's formatting decisions change between
+      # releases, so CI must use a fixed version rather than "whatever the
+      # runner has today". This will not match a contributor's local
+      # clang-format exactly - CI is the source of truth for this check.
+      - name: Install clang-format-18
+        run: sudo apt-get update && sudo apt-get install -y clang-format-18
+
+      # root_certificates.hpp is vendored Boost.Beast example code, not
+      # project code - excluded from our style rules (see CLAUDE.md 3.1).
+      - name: Check formatting
+        run: |
+          git ls-files '*.h' '*.hpp' '*.cc' '*.cpp' \
+            | grep -v 'md_provider/ws/root_certificates.hpp' \
+            | xargs clang-format-18 --style=file --dry-run -Werror

@@ -26,7 +26,7 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
 }  // namespace
 
 std::optional<BookUpdate> ParseBybitOrderbookMessage(const std::string& message, VenueId venue,
-                                                      InstrumentId instrument) {
+                                                     InstrumentId instrument) {
     // Contract: never throws. simdjson_error (malformed JSON, unexpected
     // shape) becomes std::nullopt, same as "not an orderbook message" -
     // callers must not need a try/catch of their own.

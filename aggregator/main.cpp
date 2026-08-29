@@ -21,9 +21,8 @@ int main() {
     // Core has no knowledge of gRPC - this lambda is the only thing that
     // connects the two, matching the same seam-style callback used
     // everywhere else in this project (Provider::CallBack, Core::BboCallback).
-    Core core([&service](InstrumentId instrument, const consolidated::BBO& bbo) {
-        service.PublishBbo(instrument, bbo);
-    });
+    Core core(
+        [&service](InstrumentId instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); });
 
     CoreConfig config = {
         .venues = {VenueId::BINANCE, VenueId::BYBIT, VenueId::OKX},

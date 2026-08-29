@@ -17,7 +17,7 @@ namespace market_data {
 class AggregatorServiceImpl final : public wire::Aggregator::Service {
    public:
     grpc::Status Subscribe(grpc::ServerContext* context, const wire::SubscribeRequest* request,
-                            grpc::ServerWriter<wire::Update>* writer) override;
+                           grpc::ServerWriter<wire::Update>* writer) override;
 
     // Called by whoever owns Core (main.cpp), via Core's BboCallback,
     // whenever a new consolidated BBO is available. Fans out to every
