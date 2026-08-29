@@ -3,9 +3,11 @@
 #include "types/venue.h"
 #include "venue_book.h"
 #include "consolidated_bbo.h"
+#include "consolidated_book.h"
 #include "types.h"
 #include "logger/logger.h"
 #include <functional>
+#include <memory>
 #include <mutex>
 
 namespace market_data {
@@ -18,7 +20,18 @@ class Core {
    public:
     using BboCallback = std::function<void(InstrumentId, const consolidated::BBO&)>;
 
-    explicit Core(BboCallback bbo_callback = nullptr) : bbo_callback_(std::move(bbo_callback)) {}
+    // Fired after every depth update with a fresh, immutable merged book.
+    // shared_ptr, not a reference: fan-out to N subscribers is N refcount
+    // bumps, and the pointer stays valid for whatever the callback does with
+    // it after Core moves on to the next update. Core knows nothing about
+    // bands or clients - it only produces the merged book; deciding which
+    // bands to compute from it, for whom, is the subscriber's job (the
+    // aggregator service), which is what makes per-client custom thresholds
+    // (§8.4) possible without Core knowing about clients at all.
+    using BookCallback = std::function<void(InstrumentId, std::shared_ptr<const consolidated::Book>)>;
+
+    explicit Core(BboCallback bbo_callback, BookCallback book_callback);
+
     ~Core() = default;
 
     void Init(const CoreConfig& config);
@@ -26,9 +39,16 @@ class Core {
     // Fed by whoever owns the Provider(s) (the wiring layer, e.g. main.cpp).
     // Core has no knowledge of providers, sockets, or threads.
     //
-    // Depth path: maintains the per-venue books. Does NOT publish the BBO -
-    // the fast-BBO stream does that (see ApplyQuote). The books are what
-    // future band math (§8.2/§8.3) will walk.
+    // Depth path: applies the update to the per-venue book, then EAGERLY
+    // rebuilds the full k-way merge across all configured venues (DESIGN_1
+    // §5.2) and fires book_callback_ with the result - on every single
+    // update, immediately, no throttle timer (same eager-publish decision
+    // already made for BBO). This is provisional pending a real benchmark
+    // (§14 step 8): if depth update rate ever outpaces the merge cost, the
+    // fallback is throttling the merge to a fixed cadence instead of firing
+    // on every update. Does NOT publish the BBO - the fast-BBO stream does
+    // that (see ApplyQuote), a separate trigger at a separate rate; the two
+    // are never combined into one callback (§7 - never mix the streams).
     void ApplyUpdate(const BookUpdate& update);
 
     // Fast-BBO path (DESIGN_1 §4.4 option 1) - this is what drives the
@@ -56,6 +76,7 @@ class Core {
     // SPSC queue replaces this.
     std::mutex apply_mutex_;
     BboCallback bbo_callback_;
+    BookCallback book_callback_;
     InstrumentBooks venue_books_;
     InstrumentQuotes venue_quotes_;
 
@@ -65,6 +86,21 @@ class Core {
     // the incremental update doesn't fail loudly, it accumulates here
     // silently across thousands of updates.
     InstrumentBbo consolidated_bbo_;
+
+    // Free-list of merged-book buffers per instrument, so the eager
+    // per-update merge does not allocate after warm-up. A buffer is reused
+    // only when use_count() == 1 - no subscriber still holds a reference to
+    // it - which shared_ptr's own atomic refcount already tracks, so there
+    // is no seqlock or manual synchronization here (per §7: no lock-free
+    // structures without a measured reason). "Assume no slow subscriber" -
+    // if that assumption breaks, the pool simply grows by one buffer rather
+    // than corrupting anything.
+    std::unordered_map<InstrumentId, std::vector<std::shared_ptr<consolidated::Book>>> book_pools_;
+
+    // Returns a Book buffer for `instrument` that no subscriber currently
+    // holds, reusing one from the pool if possible. Not thread-safe on its
+    // own - called only from within apply_mutex_.
+    std::shared_ptr<consolidated::Book> AcquireBookBuffer(InstrumentId instrument);
 };
 
 }  // namespace market_data

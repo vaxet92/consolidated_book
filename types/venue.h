@@ -17,7 +17,9 @@ enum class VenueId : uint16_t {
     COUNT = 3,
 };
 
-inline constexpr std::array<VenueId, static_cast<size_t>(VenueId::COUNT)> VenueIdArray{
+constexpr size_t kVenueCount = static_cast<size_t>(VenueId::COUNT);
+
+inline constexpr std::array<VenueId, kVenueCount> VenueIdArray{
     VenueId::BINANCE,
     VenueId::BYBIT,
     VenueId::OKX,

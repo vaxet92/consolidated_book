@@ -73,4 +73,4 @@ plain build above is the one that actually works right now.
 export CC=/opt/homebrew/opt/llvm/bin/clang
 export CXX=/opt/homebrew/opt/llvm/bin/clang++
 
-
+clang++ -std=c++20 -fsyntax-only -I. -Imd_core md_core/consolidated_book.cpp 

@@ -3,6 +3,7 @@ add_library(md_core STATIC
     md_core.cpp
     venue_book.cpp
     consolidated_bbo.cpp
+    consolidated_book.cpp
 )
 
 target_include_directories(md_core PUBLIC

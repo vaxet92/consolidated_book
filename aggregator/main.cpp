@@ -18,11 +18,20 @@ int main() {
 
     AggregatorServiceImpl service;
 
-    // Core has no knowledge of gRPC - this lambda is the only thing that
+    // Core has no knowledge of gRPC - these lambdas are the only thing that
     // connects the two, matching the same seam-style callback used
     // everywhere else in this project (Provider::CallBack, Core::BboCallback).
+    //
+    // BBO has no per-client parameterization, so Core computes it fully and
+    // the service just relays it. The merged Book DOES have per-client
+    // parameterization (§8.4's bands) - Core hands over the shared snapshot
+    // and decides nothing about bands; PublishVolumeBands/PublishPriceBands
+    // (not built yet) are where per-subscriber band math will happen.
     Core core(
-        [&service](InstrumentId instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); });
+        [&service](InstrumentId instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); },
+        [&service](InstrumentId instrument, std::shared_ptr<const consolidated::Book> book) {
+            service.PublishBook(instrument, std::move(book));
+        });
 
     CoreConfig config = {
         .venues = {VenueId::BINANCE, VenueId::BYBIT, VenueId::OKX},

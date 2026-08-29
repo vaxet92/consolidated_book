@@ -199,7 +199,7 @@ TEST(ConsolidatedBboTest, IncrementalMatchesFullScanOverRandomStream) {
     // the SAME range, so crossed books occur constantly too.
     std::uniform_int_distribution<uint64_t> price_dist(100, 104);
     std::uniform_int_distribution<uint64_t> qty_dist(1, 9);
-    std::uniform_int_distribution<size_t> venue_dist(0, static_cast<size_t>(VenueId::COUNT) - 1);
+    std::uniform_int_distribution<size_t> venue_dist(0, kVenueCount - 1);
 
     VenueQuoteArray quotes{};
     consolidated::BBO incremental;

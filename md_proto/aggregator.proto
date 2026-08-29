@@ -6,13 +6,6 @@ service Aggregator {
   rpc Subscribe(SubscribeRequest) returns (stream Update);
 }
 
-enum Feed {
-  FEED_UNSPECIFIED = 0;
-  BBO = 1;
-  VOLUME_BANDS = 2;
-  PRICE_BANDS = 3;
-}
-
 enum Venue {
   VENUE_UNSPECIFIED = 0;
   BINANCE = 1;
@@ -20,22 +13,38 @@ enum Venue {
   OKX = 3;
 }
 
-message SubscribeRequest {
-  string symbol = 1;                    // "BTCUSDT"
-  repeated Feed feeds = 2;
-  repeated int64 notional_bands = 3;    // scaled; defaults applied if empty. VOLUME_BANDS param.
-  repeated uint32 bps_bands = 4;        // defaults applied if empty. PRICE_BANDS param.
-  uint32 throttle_ms = 5;               // client-requested conflation rate
+message VolumeBandsRequest {
+  repeated uint64 notional_bands = 1;  // scaled; empty = server defaults
 }
 
+message PriceBandsRequest {
+  repeated uint32 bps_bands = 1;       // empty = server defaults
+}
+
+// Feeds are selected by PRESENCE, not by an enum list: a `Feed` enum plus
+// separate parameter arrays made an empty array ambiguous ("use defaults" vs
+// "not subscribed"). With optional sub-messages, presence means subscribed
+// and an empty array inside means defaults - no collision.
+//
+// `optional` cannot be applied to a `repeated` field in proto3, which is why
+// the arrays are wrapped in a message rather than living here directly.
+message SubscribeRequest {
+  string symbol = 1;                              // "BTCUSDT"
+  bool bbo = 2;                                   // subscribe to BBO
+  optional VolumeBandsRequest volume_bands = 3;   // PRESENT = subscribed
+  optional PriceBandsRequest price_bands = 4;     // PRESENT = subscribed
+}
+
+// All prices/quantities/notionals are unsigned across the wire, matching
+// PriceTicks/QtyUnits in the domain types - none of them can be negative.
 message VenueQuote {
   Venue venue = 1;
-  int64 qty = 2;
+  uint64 qty = 2;
 }
 
 message ConsolidatedPriceLevel {
-  int64 price = 1;
-  int64 total_qty = 2;
+  uint64 price = 1;
+  uint64 total_qty = 2;
   repeated VenueQuote venues = 3;  // only venues quoting exactly this price
 }
 
@@ -46,12 +55,13 @@ message Bbo {
 }
 
 message VolumeBandResult {
-  int64 notional_threshold = 1;   // which band this result is for, e.g. 1_000_000 scaled
-  int64 vwap = 2;
-  int64 worst_price = 3;          // last level touched
-  int64 filled_notional = 4;
-  int64 filled_qty = 5;
+  uint64 notional_threshold = 1;  // which band this result is for, e.g. 1_000_000 scaled
+  uint64 vwap = 2;
+  uint64 worst_price = 3;         // last level touched
+  uint64 filled_notional = 4;
+  uint64 filled_qty = 5;
   bool insufficient_depth = 6;
+  uint32 level_count = 7;         // levels consumed (the partial one counts)
 }
 
 message VolumeBands {
@@ -61,11 +71,11 @@ message VolumeBands {
 
 message PriceBandResult {
   uint32 bps_threshold = 1;
-  int64 cum_qty = 2;
-  int64 cum_notional = 3;
-  int64 vwap = 4;
+  uint64 cum_qty = 2;
+  uint64 cum_notional = 3;
+  uint64 vwap = 4;
   uint32 level_count = 5;
-  int64 limit_price = 6;
+  uint64 limit_price = 6;
 }
 
 message PriceBands {

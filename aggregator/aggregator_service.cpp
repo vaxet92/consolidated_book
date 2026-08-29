@@ -34,12 +34,15 @@ void AggregatorServiceImpl::UnregisterSession(uint64_t session_id) {
 
 grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, const wire::SubscribeRequest* request,
                                               grpc::ServerWriter<wire::Update>* writer) {
-    for (int i = 0; i < request->feeds_size(); ++i) {
-        if (request->feeds(i) != wire::BBO) {
-            return grpc::Status(
-                grpc::StatusCode::UNIMPLEMENTED,
-                "only BBO is implemented so far - VOLUME_BANDS/PRICE_BANDS band math doesn't exist yet");
-        }
+    // Feeds are selected by presence (§8.4): bbo is a bool, the band feeds
+    // are optional sub-messages whose presence means "subscribed" and whose
+    // (possibly empty) array picks the thresholds.
+    if (request->has_volume_bands() || request->has_price_bands()) {
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED,
+                            "band feeds are not wired up yet - only bbo is served today");
+    }
+    if (!request->bbo()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "subscription requests no feeds");
     }
 
     InstrumentId instrument = VenueConverter::ToInstrumentId(request->symbol());
@@ -84,5 +87,12 @@ void AggregatorServiceImpl::PublishBbo(InstrumentId instrument, const consolidat
         channel->Push(update);
     }
 }
+
+void AggregatorServiceImpl::PublishBook(InstrumentId instrument, std::shared_ptr<const consolidated::Book> book) {}
+
+void AggregatorServiceImpl::PublishVolumeBands(InstrumentId instrument,
+                                               const std::vector<consolidated::NotionalFill>& bands) {}
+void AggregatorServiceImpl::PublishPriceBands(InstrumentId instrument,
+                                              const std::vector<consolidated::BpsFill>& bands) {}
 
 }  // namespace market_data

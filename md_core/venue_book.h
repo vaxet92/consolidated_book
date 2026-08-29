@@ -41,7 +41,7 @@ class VenueBook {
 
 // One VenueBook per venue, indexed by VenueId. A null entry means that
 // venue isn't configured for this instrument.
-using VenueBookArray = std::array<std::unique_ptr<VenueBook>, static_cast<size_t>(VenueId::COUNT)>;
+using VenueBookArray = std::array<std::unique_ptr<VenueBook>, kVenueCount>;
 
 class PrintHelper {
    public:

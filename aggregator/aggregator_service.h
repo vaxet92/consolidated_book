@@ -10,6 +10,7 @@
 #include "aggregator.grpc.pb.h"
 #include "conflated_channel.h"
 #include "md_core/consolidated_bbo.h"
+#include "md_core/consolidated_book.h"
 #include "types/venue.h"
 
 namespace market_data {
@@ -24,6 +25,17 @@ class AggregatorServiceImpl final : public wire::Aggregator::Service {
     // currently-subscribed BBO session. May be called from any provider's
     // thread - must be safe to call concurrently.
     void PublishBbo(InstrumentId instrument, const consolidated::BBO& bbo);
+
+    // Called by Core's BookCallback with a fresh, immutable merged book on
+    // every depth update. Core decides nothing about bands here - this is
+    // where per-subscriber band selection happens (§8.4): for each
+    // registered client, walk its own thresholds against this shared
+    // snapshot and publish. STUB for now - real body lands with the
+    // subscription registry.
+    void PublishBook(InstrumentId instrument, std::shared_ptr<const consolidated::Book> book);
+
+    void PublishVolumeBands(InstrumentId instrument, const std::vector<consolidated::NotionalFill>& bands);
+    void PublishPriceBands(InstrumentId instrument, const std::vector<consolidated::BpsFill>& bands);
 
    private:
     using Channel = ConflatedChannel<wire::Update>;

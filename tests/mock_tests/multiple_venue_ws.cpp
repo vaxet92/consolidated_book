@@ -17,7 +17,10 @@ int main() {
         .default_instruments = {InstrumentId::BTCUSDT},
     };
 
-    market_data::Core core;
+    // Null callbacks on purpose: this mock only checks that the three
+    // providers connect and feed real data into the venue books. It never
+    // publishes, so there is nothing for a BBO or merged-book callback to do.
+    market_data::Core core(nullptr, nullptr);
     core.Init(config);
     core.Start();
 

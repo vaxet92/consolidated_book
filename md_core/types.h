@@ -12,6 +12,13 @@ using PriceTicks = uint64_t;         // price x 1e8, integral on the canonical g
 using QtyUnits = uint64_t;           // base quantity x 1e8. Never negative.
 using Notional = unsigned __int128;  // ticks * units - needs the extra width. Never negative.
 
+// The fixed scale behind PriceTicks/QtyUnits: the real value x 1e8. Both
+// forms are needed - the exponent goes on the wire (Update.price_scale), the
+// factor is used in band arithmetic to convert between the raw price x qty
+// product (x 1e16) and a notional in quote currency (x 1e8).
+inline constexpr uint32_t kScaleExponent = 8;
+inline constexpr uint64_t kScaleFactor = 100'000'000;
+
 // Any place that needs a *signed* difference between two PriceTicks/QtyUnits
 // (e.g. a crossed book: bid - ask) must compute it explicitly as
 // (bool sign, PriceTicks magnitude) - compare first, then subtract the
@@ -60,7 +67,7 @@ struct BboQuote {
 // consolidation, not consolidated output - which is why it lives here at
 // market_data scope, mirroring VenueBookArray, rather than in the
 // `consolidated` namespace.
-using VenueQuoteArray = std::array<BboQuote, static_cast<size_t>(VenueId::COUNT)>;
+using VenueQuoteArray = std::array<BboQuote, kVenueCount>;
 
 // Core's own config, typed (VenueId/InstrumentId), not raw strings.
 // Whoever loads the config file (main.cpp) translates strings to enums

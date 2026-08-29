@@ -18,14 +18,14 @@ wire::Venue ToWire(VenueId venue) {
 
 wire::ConsolidatedPriceLevel ToWire(const consolidated::ConsolidatedPriceLevel& level) {
     wire::ConsolidatedPriceLevel wire_level;
-    // PriceTicks/QtyUnits are unsigned; proto fields are int64. Safe: real
-    // scaled prices/quantities never approach 2^63.
-    wire_level.set_price(static_cast<int64_t>(level.price));
-    wire_level.set_total_qty(static_cast<int64_t>(level.total_qty));
+    // No casts: PriceTicks/QtyUnits are uint64_t and the proto fields are
+    // uint64 too, so these are exact, same-width assignments.
+    wire_level.set_price(level.price);
+    wire_level.set_total_qty(level.total_qty);
     for (const auto& venue_quote : level.venues) {
         wire::VenueQuote* wire_quote = wire_level.add_venues();
         wire_quote->set_venue(ToWire(venue_quote.venue));
-        wire_quote->set_qty(static_cast<int64_t>(venue_quote.qty));
+        wire_quote->set_qty(venue_quote.qty);
     }
     return wire_level;
 }

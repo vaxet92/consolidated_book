@@ -21,17 +21,15 @@ constexpr int kMaxBackoffSeconds = 8;
 
 // Pure integer formatting - no floating point, even at display time.
 // 7831010000000 at scale=8 becomes "78310.10000000".
-std::string FormatScaled(int64_t value, uint32_t scale) {
-    int64_t divisor = 1;
+//
+// Unsigned throughout, matching the wire types: no negative-remainder case
+// to correct for, which the signed version needed.
+std::string FormatScaled(uint64_t value, uint32_t scale) {
+    uint64_t divisor = 1;
     for (uint32_t i = 0; i < scale; ++i) {
         divisor *= 10;
     }
-    int64_t integer_part = value / divisor;
-    int64_t frac_part = value % divisor;
-    if (frac_part < 0) {
-        frac_part = -frac_part;
-    }
-    return fmt::format("{}.{:0{}}", integer_part, frac_part, scale);
+    return fmt::format("{}.{:0{}}", value / divisor, value % divisor, scale);
 }
 
 // Per-venue attribution (DESIGN_1 §5.3) - e.g. "BINANCE:0.00531,OKX:0.00200"
@@ -60,7 +58,9 @@ int main() {
 
         wire::SubscribeRequest request;
         request.set_symbol("BTCUSDT");
-        request.add_feeds(wire::BBO);
+        // Feeds are selected by presence now, not an enum list: this client
+        // wants BBO only, so volume_bands/price_bands are simply left unset.
+        request.set_bbo(true);
 
         // A ClientContext is single-use - it must be recreated per attempt.
         grpc::ClientContext context;
