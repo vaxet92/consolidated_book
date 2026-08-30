@@ -4,15 +4,17 @@ Aggregates BTCUSDT spot market data from three exchanges (Binance, OKX, Bybit) i
 
 Four services:
 
-| Service | What it does |
+| Binary | What it does |
 |---|---|
-| `aggregator` | Connects to the three exchanges, builds the consolidated book, serves gRPC |
-| `client-bbo` | Prints the consolidated best bid / offer |
-| `client-volume-bands` | Prints VWAP for 1M / 5M / 10M / 25M / 50M+ USDT notional |
-| `client-price-bands` | Prints liquidity within 50 / 100 / 200 / 500 / 1000bps of the BBO |
+| `aggregator_app` | Connects to the three exchanges, builds the consolidated book, serves gRPC |
+| `client_app` | The client. Any combination of feeds, selected by command-line flags |
+| `bbo_sub` | Fixed-subscription test binary: BBO only, no flags |
+| `volume_band_sub` | Fixed-subscription test binary: volume bands only |
+| `price_band_sub` | Fixed-subscription test binary: price bands only |
 
-> **Status: design complete, implementation in progress.**
-> Build and run sections are filled in as the code lands. The technical decisions below are final and are the part worth reading now.
+The three `*_sub` binaries exist to exercise one feed in isolation while debugging. `client_app` is what actually ships — all four share `client_common` for connection handling, gap detection and formatting.
+
+> **Status: working end-to-end against live exchange data.** All three feeds publish. Docker, benchmarks, and the staleness policy are not built — see [Known limitations](#known-limitations).
 
 ---
 
@@ -36,11 +38,17 @@ Each decision below lists what was chosen, why, and what was rejected. The full 
 
 ## Threading and ownership
 
-**Three exchange threads parse. One consolidator thread owns all the books.**
+**Three exchange threads parse. `Core` owns all the books, guarded by one mutex.**
 
-Each exchange has its own thread doing WebSocket receive, TLS decrypt and JSON parse. The result is a normalized update pushed into a single-producer single-consumer (SPSC) ring buffer. The consolidator thread drains the queues, applies the updates to the three order books, merges them, calculates the derived views and publishes.
+Each exchange has its own thread doing WebSocket receive, TLS decrypt and JSON parse. Each then calls `Core::ApplyUpdate` (depth) or `Core::ApplyQuote` (fast-BBO) **directly**, and a single `std::mutex` inside `Core` serializes them.
 
-The important consequence: **there is no lock anywhere on the order book path.** No mutex, no seqlock, no atomics on book state. One thread owns the books, so nothing is shared. The book logic is single-threaded, which makes it deterministic, easy to test with fake input, and clean under ThreadSanitizer by construction instead of by being careful.
+**This is not the design described below, and the difference is worth being explicit about.** The intended architecture — per-venue SPSC ring buffers drained by one dedicated consolidator thread, with no lock anywhere on the book path — is the right shape and is analyzed in the rejected-alternatives section that follows. It was **not built**. What exists is the interim mutex, marked as such in `md_core.h`.
+
+What that costs: the three parser threads contend on one lock, and the merge plus band publish happens inside the critical section rather than on a separate thread. At the rates the public channels actually deliver (~100 depth updates/sec combined, ~300 fast-BBO), contention is not measurable — but it is a real ceiling the SPSC design would not have.
+
+What it keeps: the book logic itself is still effectively single-threaded and deterministic, since only one thread is ever inside it. The testability argument survives; the lock-free claim does not.
+
+**Condition to revisit:** provider threads blocking measurably on `apply_mutex_`, or the merge cost inside the lock becoming visible in publish latency. Neither is measured today — no benchmark exists, which is itself a gap (see [Known limitations](#known-limitations)).
 
 ### Rejected: each exchange thread owns its own book, with a seqlock for the reader
 
@@ -76,23 +84,25 @@ ZeroMQ between components in the same process would serialize a struct, copy it 
 
 Splitting each exchange adapter into its own process and container *is* a real architecture: one adapter crashing would not affect the others, and each could be restarted alone. The cost is serialization on every update, extra latency, and more failure modes. For a single symbol on three exchanges, one process is the right trade. Noted because the isolation argument is genuine and would win at larger scale.
 
-## Consolidation: merge at publish time, not per update
+## Consolidation: three books merged fresh, never one shared book
 
-The consolidator keeps three separate order books and merges them when it publishes, rather than maintaining one shared consolidated book that every update writes into.
-
-Two reasons.
+`Core` keeps three separate `VenueBook`s and rebuilds the merged view from them, rather than maintaining one shared consolidated book that every update writes into.
 
 **Removing an exchange stays cheap.** If one feed breaks and must be excluded, the merge simply skips it — one `if`. In a shared consolidated book its quantities are already mixed into every price level, so excluding it means walking the whole book and subtracting, then walking it again to add it back on recovery. A resync after a sequence gap is worse: the whole book is replaced.
 
-**The cost follows the publish rate, not the feed rate.** Updates arrive faster than we publish, so merging per publish does strictly less work. It also means switching to tick-by-tick channels later does not change the publish cost at all.
+**When the merge runs changed during implementation.** The original plan was to merge only at publish time, on the reasoning that updates arrive faster than we publish. That stopped applying once publishing became eager: **every depth update now triggers a full k-way merge immediately**, and the result is handed out as an immutable `shared_ptr<const Book>` snapshot. Publish time *is* update time; there is no separate publish clock to amortize against.
 
-The best bid and offer are the exception. They are cached per exchange and the consolidated BBO is a `max` and a `min` over three values, so that path stays cheap enough to run on every update.
+That is a deliberate trade, not an oversight. It is the simplest thing that is correct, it matches the same eager choice made for BBO, and at ~100 depth updates/sec against a merge estimated in low single-digit microseconds there is wide headroom. It is also unmeasured — see [Hot paths](#hot-paths-not-yet-optimized).
 
-## The consolidator wakes on updates, not on a timer
+The best bid and offer take a different path entirely: they are driven by the venues' fast-BBO channels, cached per exchange, and consolidated incrementally rather than by merging depth at all.
 
-Any exchange update sets a dirty flag and signals the consolidator. It drains, works, publishes, and loops.
+## Publishing is eager, with no timer
 
-This is self-clocking. In a quiet market a single update wakes it and it publishes immediately, with no artificial delay. In a burst, the updates that arrive while it is working collapse into the next pass automatically. There is no fixed rate to tune. Clients that want less can set `throttle_ms` in the subscription.
+There is no consolidator thread and no publish timer. A depth update merges and publishes on the calling provider's thread; a fast-BBO quote updates and publishes the consolidated BBO the same way.
+
+The conflation that used to be the consolidator's job now lives entirely in the per-client channel: if a client is slower than the publish rate, its pending update is replaced rather than queued (see below). So bursts still collapse — just at the client boundary rather than in a central loop.
+
+`throttle_ms` was specified as a per-subscription rate floor. It is **not implemented** and has been removed from the proto rather than left on the wire doing nothing.
 
 ## Slow clients: send the newest state, skip what was replaced
 
@@ -102,15 +112,17 @@ This is safe because an order book is a **state**, not a list of events. If stat
 
 A trade feed would be different — trades are events and skipping one loses information permanently.
 
-This choice forces a related one: **every message carries full state, not a delta.** A client that skipped a message cannot apply the next delta correctly. The BBO and both band messages are small, so full state costs almost nothing and makes skipping safe automatically. The raw depth feed does use deltas, so a client too slow for it is sent a fresh snapshot to restart from.
+This choice forces a related one: **every message carries full state, not a delta.** A client that skipped a message cannot apply the next delta correctly. The BBO and both band messages are small, so full state costs almost nothing and makes skipping safe automatically. No delta feed is published at all — the raw depth stream was dropped from the protocol, so every payload on the wire is self-contained.
 
-Every message carries a sequence number that increases by one on the server side, so a client can see exactly how many states it skipped. It is reported to stderr by the bundled clients and exported as a metric.
+Every message carries a sequence number that increases by one, so a client can see exactly how many states it skipped. The sequence is **per session**, not global: a gap must mean *this* client's channel conflated something, and a shared counter would make every client report gaps caused by traffic sent to someone else. The bundled clients report gaps to stderr. There are no metrics — nothing is exported.
 
 Note that Binance already does this to us: `depth@100ms` is a conflated stream. The real book changes thousands of times per second and we receive one grouped message per 100ms. We are applying the same idea one level further down.
 
 A client can opt out per subscription. Then it gets a bounded queue, and if the queue fills it is disconnected with a clear error. There is no third option — a client that reads slower than the data arrives either skips states or disconnects. Buffering is just a delayed disconnect that serves wrong data in the meantime.
 
 ## Stale and disconnected exchanges
+
+> **Status: designed, NOT built.** None of the policy below exists in code. `VenueStatus` is on the wire but never populated, and a stale venue currently keeps contributing to the consolidated book with no indication to the client. What *is* built is the layer underneath it: per-venue sequence-gap detection with automatic resync (see [Sequencing](#websocket-for-updates-rest-only-for-the-initial-snapshot)), which catches a *broken* feed but not a merely *slow* one. The rest is the design that would sit on top.
 
 An order book is state, not an event stream, so there is no merged timeline to reconstruct across exchanges. We hold the latest known state of each one and sum them. Latency does not need aligning — it needs a staleness policy.
 
@@ -150,19 +162,36 @@ The band calculations are written to handle a crossed book, and it is a required
 
 ## Numbers are scaled integers
 
-All prices and quantities are `int64` scaled by a fixed factor, both internally and on the wire, with the scale declared in the proto file. No floating point anywhere in the book or the protocol. Doubles accumulate error across VWAP sums and compare badly for price level identity.
+All prices and quantities are **`uint64` scaled by 1e8**, both internally and on the wire — unsigned because none of them can be negative. No floating point anywhere in the book or the protocol. Doubles accumulate error across VWAP sums and compare badly for price-level identity, which matters directly here: consolidating two venues at "the same price" is an equality comparison, and `78310.10` is not exactly representable in binary floating point.
 
-The three exchanges have different tick sizes, so the internal price grid uses the smallest tick among the configured exchanges. Every exchange price then maps onto it exactly, with no rounding and therefore no rounding bias. An exchange whose tick does not divide evenly is rejected at startup rather than silently rounded.
+Notional needs more width than the values it comes from: `price × qty` at 1e8 each lands at 1e16, and a 50M USDT band is ~5e23 — past `uint64` and past a double's exact-integer range. Internally that accumulation uses `unsigned __int128`; the wire carries the result divided back down to 1e8.
+
+Responses declare their scale explicitly (`price_scale`/`qty_scale` on every `Update`), so a client needs no out-of-band knowledge to read one. Requests do not have such a field, so the fixed 1e8 scale is documented as a protocol constant in the `.proto` — an asymmetry that is deliberate but not ideal, and noted there.
+
+**Not built:** a shared tick grid. The design called for the internal price grid to use the smallest tick among the configured exchanges, with any exchange whose tick does not divide evenly rejected at startup. Nothing validates tick sizes today; prices are taken as the venues send them and compared directly.
 
 ## Protocol: one streaming call, not three
 
-One `Subscribe` server-streaming RPC with a `oneof` payload, rather than a separate RPC per publisher type. A new derived view becomes one new enum value with no change to the service definition, and one client can take several feeds over a single connection.
+One `Subscribe` server-streaming RPC with a `oneof` payload, rather than a separate RPC per publisher type. A new derived view becomes one new `oneof` arm with no change to the service definition, and one client can take several feeds over a single connection.
 
-Depth, band values and update rate are all subscription parameters. The values in the assignment (1M/5M/10M/25M/50M+, 50/100/200/500/1000bps) are **defaults**, not constants.
+**Feeds are selected by presence, not by an enum list.** The original design had a `Feed` enum plus separate parameter arrays, which made an empty array ambiguous — "subscribe with server defaults" and "not subscribed" looked identical. Optional sub-messages remove the collision: presence means subscribed, and an empty array inside means defaults.
 
-A unary `GetSnapshot` is also provided, for clients joining late or recovering.
+```proto
+message SubscribeRequest {
+  string symbol = 1;
+  bool bbo = 2;
+  optional VolumeBandsRequest volume_bands = 3;   // PRESENT = subscribed
+  optional PriceBandsRequest price_bands = 4;     // PRESENT = subscribed
+}
+```
+
+(`optional` cannot be applied to a `repeated` field in proto3, which is why the arrays are wrapped in a message rather than sitting here directly.)
+
+Band thresholds are per-subscription: two clients can ask for different bands and each gets its own, computed from the same shared merged book. The server sorts them ascending before use — the single-pass band walk never rewinds, so unsorted input would silently produce wrong results.
 
 The symbol is a field everywhere even though only BTCUSDT is used, so supporting more symbols needs no protocol change.
+
+**Not built:** the unary `GetSnapshot` for late-joining clients, and `throttle_ms`. The latter was removed from the proto rather than left present and inert.
 
 ## Band definitions
 
@@ -170,9 +199,11 @@ Both had real ambiguity, so both interpretations are recorded here.
 
 **Volume bands** are cumulative from the top of the book: the 5M band covers the first 5M USDT of notional, not the slice between 1M and 5M. Both prices are published — the **VWAP** (average price to fill that size) and the **worst price** (the last level reached) — along with filled quantity, filled notional, and a flag when the book runs out before the band is filled. Notional is in USDT, the quote currency.
 
-**Price bands** are also cumulative, measured from the consolidated BBO because the assignment says "BBO+". The 100bps band includes everything from the BBO out to 100bps, which contains the 50bps band. Measuring from the mid price is the more common convention and behaves better when the spread is wide or the book is crossed, so it is available as a configuration flag.
+**Price bands** are also cumulative, measured from the consolidated BBO because the assignment says "BBO+". The 100bps band includes everything from the BBO out to 100bps, which contains the 50bps band. Measuring from the mid price is the more common convention and behaves better when the spread is wide or the book is crossed — it is noted as the alternative but **not implemented**; there is no configuration flag for it.
 
-The 1000bps band is 10% away from the BBO, which is deeper than the public depth channels reach. It will regularly report insufficient depth. That is expected behaviour and is flagged explicitly, never silently truncated.
+The 1000bps band is 10% away from the BBO, which is deeper than any public depth channel reaches at any depth setting. It reports `insufficient_depth`, meaning the totals are a **lower bound** rather than the full liquidity within the band.
+
+That flag was originally omitted from price bands, on the reasoning that "how much is within X bps" is fully answered by "not much". That reasoning was wrong: it holds when the *market* ends, but not when *our own depth budget* ends — and on the wire the two were indistinguishable. A truncated 1000bps band looked exactly like a complete one.
 
 ## Spot only
 
@@ -180,26 +211,63 @@ Spot BTCUSDT on all three exchanges. Spot and perpetual futures are different in
 
 ## WebSocket for updates, REST only for the initial snapshot
 
-All live updates arrive over WebSocket. REST is used only to fetch the starting snapshot, and again after a reconnect. This is not a preference — Binance's documented synchronization procedure requires the REST snapshot to bootstrap the diff stream.
+All live updates arrive over WebSocket. **Only Binance needs REST** — its depth stream is differential-only and never sends a snapshot, so its documented procedure requires bootstrapping from `GET /api/v3/depth`. Bybit and OKX both send an in-channel snapshot on subscribe, so they need no HTTP client at all.
 
-Each exchange runs the same state machine: connect, subscribe, buffer updates, fetch the snapshot, discard buffered updates older than it, then go live. A sequence gap means the book is *wrong*, which is worse than stale, so it triggers an immediate resync with backoff and jitter to avoid a storm of snapshot requests.
+That difference means the venues do **not** run the same state machine, and their sequencing rules differ more than expected:
 
-The fast BBO channels (`bookTicker`, `bbo-tbt`, `orderbook.1`) are subscribed but their ticks are **never** written into the depth book — the two streams are not sequenced together, so mixing them would corrupt it. They are used only as a correctness check: if the book-derived BBO disagrees with the fast BBO stream for more than about 200ms, our book is wrong and a resync is forced.
+| Venue | Snapshot | Continuity rule |
+|---|---|---|
+| **Binance** | REST, buffer-then-reconcile | `U == previous u + 1` |
+| **Bybit** | in-channel | `u` increments by exactly 1; `u == 1` means a service restart and is fresh snapshot data despite the message still saying `"delta"` |
+| **OKX** | in-channel | `prevSeqId == previous seqId` — ids are **not** contiguous, so a "+1" rule would be wrong. A backwards `seqId` is a documented maintenance reset, not a gap |
 
-OKX sends a CRC32 checksum over the top of its book. It is verified on every message, and it doubles as a property test over recorded data — if the book implementation has an off-by-one anywhere, this finds it.
+A sequence gap means the book is *wrong*, which is worse than stale, so it triggers a resync. Resync is deliberately kept separate from the reconnect-failure path — a gap is a normal operational event and must not consume the reconnect-attempt budget that permanently stops a provider.
+
+**The fast-BBO channels drive the published BBO.** `bookTicker` / `bbo-tbt` / `orderbook.1` are real-time or ~10ms, against 100ms-throttled depth, so the BBO feed is sourced from them directly. Their ticks are still **never** written into the depth book — the two streams are not mutually sequenced, so mixing them would corrupt it — but they are a publishing path, not just a check.
+
+**Not built:** the oracle that was the original justification for subscribing to them — comparing the depth-derived BBO against the fast-BBO stream and forcing a resync when they disagree for ~200ms.
+
+**OKX's CRC32 is gone.** This document previously described verifying it on every message as free end-to-end validation. OKX has since deprecated it: the field is still present but its **value is fixed to 0**, and they direct users to `seqId`/`prevSeqId` instead. Consequence worth stating plainly — no venue now offers a per-message check against its own book, so a *misapplied* update (as opposed to a *missed* one) has no live detector. That makes the unbuilt fast-BBO oracle more valuable than when it was first written down.
 
 ## Record and replay
 
-A capture tool records raw exchange frames with their arrival timestamps, and a replay provider feeds them back through the same parsing path.
+**Not built.** The intent was a capture tool recording raw exchange frames with arrival timestamps, and a replay provider feeding them back through the same parsing path — giving repeatable tests for the book logic, sequencing state machines and band math, plus a docker-compose profile that runs with no network access at all.
 
-This is what makes the book logic, the sequencing state machine, the staleness policy and the band calculations testable with repeatable results. It also gives docker-compose a profile that runs the entire system with no network access at all, which matters if the exchanges are unreachable from where this is being reviewed.
+What exists instead: unit tests drive the parsers, sequencing rules and band math directly with hand-built inputs, including real captured payloads pasted into the parser tests. That covers the logic but not timing, and it means nothing exercises the full pipeline deterministically.
+
+---
+
+# Hot paths not yet optimized
+
+Everything here is a **known cost accepted deliberately**, not an oversight. None of it is measured — there is no benchmark in the project, which is the first thing to fix before optimizing any of it.
+
+| Path | Cost | Fix, when a number justifies it |
+|---|---|---|
+| **Eager merge per depth update** (`Core::ApplyUpdate`) | Full k-way merge over up to `kDefaultMaxDepth` levels × 3 venues on **every** depth message, inside `apply_mutex_` | Throttle the merge to a fixed cadence, or merge incrementally. Estimated low single-digit µs against ~100 updates/sec — wide headroom, but unverified |
+| **`apply_mutex_` in `Core`** | Three provider threads serialize on one lock; merge and publish happen inside the critical section | The SPSC-queue design in [Threading](#threading-and-ownership) — removes the lock from the book path entirely |
+| **Band vectors in `PublishBook`** | Four `std::vector`s allocated per session per publish | Scratch buffers reused across publishes. Safe because it already runs under `sessions_mutex_` |
+| **`sessions_mutex_` held across band math** | All per-session band computation happens inside the lock, blocking subscribe/unsubscribe | Snapshot the session list, compute outside the lock. Only matters with many clients |
+| **`Book` snapshot allocation** | `AcquireBookBuffer` reuses buffers when `use_count() == 1`, but grows the pool if every buffer is still referenced | Bounded pool with a defined policy when exhausted. Currently assumes no slow subscriber |
+| **Protobuf `Update` built per session** | Each subscriber gets its own serialized message, even when the payload is identical | Build once, share the serialized bytes across sessions with identical subscriptions |
+| **Logging** | `fmt::print` from multiple provider threads can interleave mid-line; no level filtering, so `LogLevel::kDebug` is indistinguishable from `kInfo` at runtime | A level check that early-outs *before* formatting, plus a lock or a single logging thread |
 
 ---
 
 # Known limitations
 
+**Not built:**
+- **Docker and docker-compose** — a required deliverable, missing.
+- **Benchmarks.** No before-numbers exist, so every performance statement in this document is an estimate and is labelled as such.
+- **Staleness policy** (§6): the watchdog, drift detector and admission rule. `VenueStatus` exists on the wire but is never populated — a stale venue still contributes silently.
+- **The fast-BBO oracle** (§4.4): comparing the depth-derived BBO against the venues' own BBO channels to detect a desynced book. This matters more than planned, because OKX **deprecated its CRC32 checksum** (now fixed at 0), removing the only per-message integrity check any venue offered. Gap detection catches *missed* messages, not *misapplied* ones.
+- **Record and replay**, and the offline compose profile that depended on it.
+- **Graceful shutdown** — no signal handling; the process only stops on an external kill, which skips provider teardown.
+- Unary `GetSnapshot`, and `throttle_ms`.
+
+**Working, with caveats:**
 - Single symbol in practice, though the code and protocol are parameterized for more.
-- The 1000bps band cannot be fully covered by the public depth channels and is reported as best-effort with a flag.
+- The 1000bps band cannot be covered by the public depth channels at any depth setting — no venue publishes 10% of book. Reported with `insufficient_depth` rather than presented as complete.
+- Venue attribution is carried at *every* merged level but only exposed for the BBO. Surfacing it per band is a proto field and an accumulator away; the partial-fill level would need a stated attribution rule.
 - No authentication or TLS on the gRPC connection.
 - Exchange fees are not included in the consolidated prices. A production aggregator would need this, since taker fees are often larger than the spread between exchanges.
-- No persistence beyond the replay capture files.
+- No persistence.
