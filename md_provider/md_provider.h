@@ -19,6 +19,14 @@ struct ProviderConfig {
     InstrumentId instrument;  // spot only for now
     std::string host;         // e.g. "stream.binance.com" - venue-specific, but data, not baked into the class
     std::string port;         // e.g. "9443"
+
+    // Book depth for THIS venue, already resolved to one of its published
+    // tiers by SelectDepthTier (config/config.h). Not the raw --depth value:
+    // venues only publish at fixed tiers, and each one rounds up differently.
+    // Where it takes effect also differs - a REST query parameter on Binance,
+    // the WS topic name on Bybit, and nothing at all on OKX, whose `books`
+    // channel is fixed at 400.
+    uint32_t depth = 500;
 };
 
 class Provider {

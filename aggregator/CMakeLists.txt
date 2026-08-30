@@ -21,4 +21,5 @@ target_link_libraries(aggregator_app PRIVATE
     aggregator
     md_provider
     logger
+    config
 )

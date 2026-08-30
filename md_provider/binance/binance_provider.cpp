@@ -49,7 +49,11 @@ void BinanceProvider::FetchSnapshotAsync() {
     snapshot_requested_ = true;
     ++snapshot_attempts_;
 
-    std::string target = fmt::format("/api/v3/depth?symbol={}&limit=1000", UpperSymbol(config.instrument));
+    // Depth is a REST query parameter on Binance - already resolved to a
+    // valid limit (5/10/20/50/100/500/1000/5000) by SelectDepthTier. An
+    // arbitrary value here would be rejected by the API.
+    std::string target =
+        fmt::format("/api/v3/depth?symbol={}&limit={}", UpperSymbol(config.instrument), config.depth);
     std::string host(kBinanceRestHost);
     std::string port(kBinanceRestPort);
     VenueId venue = config.venue_id;

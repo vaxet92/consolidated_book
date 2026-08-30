@@ -17,6 +17,7 @@ option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_SERVER "Build server app" ON)
 
 add_subdirectory(types)
+add_subdirectory(config)
 add_subdirectory(logger)
 add_subdirectory(md_core)
 add_subdirectory(md_provider)

@@ -38,4 +38,28 @@ wire::Bbo ToWire(const consolidated::BBO& bbo) {
     return wire_bbo;
 }
 
+wire::VolumeBandResult ToWire(const consolidated::NotionalFill& fill, uint64_t notional_threshold) {
+    wire::VolumeBandResult result;
+    result.set_notional_threshold(notional_threshold);
+    result.set_vwap(fill.vwap);
+    result.set_worst_price(fill.worst_price);
+    result.set_filled_notional(fill.filled_notional);
+    result.set_filled_qty(fill.filled_qty);
+    result.set_insufficient_depth(fill.insufficient_depth);
+    result.set_level_count(fill.level_count);
+    return result;
+}
+
+wire::PriceBandResult ToWire(const consolidated::BpsFill& fill, uint32_t bps_threshold) {
+    wire::PriceBandResult result;
+    result.set_bps_threshold(bps_threshold);
+    result.set_vwap(fill.vwap);
+    result.set_limit_price(fill.limit_price);
+    result.set_cum_qty(fill.cum_qty);
+    result.set_cum_notional(fill.cum_notional);
+    result.set_level_count(fill.level_count);
+    result.set_insufficient_depth(fill.insufficient_depth);
+    return result;
+}
+
 }  // namespace market_data

@@ -318,6 +318,23 @@ TEST(ConsolidatedBookTest, FillToBpsNarrowBandTakesOnlyTopLevel) {
     EXPECT_EQ(fill.cum_qty, Qty(5));
 }
 
+// A band wide enough to cover the whole book runs out before reaching its
+// limit price. Without the flag, that lower bound is indistinguishable from
+// "this is all the liquidity within the band" - the exact confusion a
+// 1000bps band on live data produces, where the walk stops at the depth
+// budget nowhere near 10% from the top.
+TEST(ConsolidatedBookTest, FillToBpsFlagsExhaustedBook) {
+    Book book = MakeBandBook();  // asks 100, 101, 102
+
+    auto wide = FillToBps(book.asks, 1000, /*is_bid=*/false);  // limit 110 - past every level
+    EXPECT_TRUE(wide.insufficient_depth) << "walked the whole book without reaching the limit";
+    EXPECT_EQ(wide.level_count, 3u);
+
+    auto narrow = FillToBps(book.asks, 100, /*is_bid=*/false);  // limit 101 - stops inside the book
+    EXPECT_FALSE(narrow.insufficient_depth) << "found the boundary, so the total is complete";
+    EXPECT_EQ(narrow.level_count, 2u);
+}
+
 TEST(ConsolidatedBookTest, FillToBpsOnEmptySideReturnsNothing) {
     Book book;
     auto fill = FillToBps(book.bids, 100, /*is_bid=*/true);

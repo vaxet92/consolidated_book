@@ -6,9 +6,7 @@ ServerConfig ServerConfig::ParseFromArgs(int argc, char* argv[]) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
 
-        if (arg.find("--interval_ms=") == 0) {
-            config.interval_ms = std::stoi(arg.substr(15));
-        } else if (arg.find("--venues=") == 0) {
+        if (arg.find("--venues=") == 0) {
             std::string venues_str = arg.substr(9);
             std::stringstream ss(venues_str);
             std::string venue;
@@ -24,31 +22,41 @@ ServerConfig ServerConfig::ParseFromArgs(int argc, char* argv[]) {
             }
         } else if (arg.find("--grpc_port=") == 0) {
             config.grpc_port = std::stoi(arg.substr(12));
+        } else if (arg.find("--depth=") == 0) {
+            config.depth = static_cast<uint32_t>(std::stoul(arg.substr(8)));
+        } else {
+            std::cerr << "Unknown argument: " << arg << "\n";
         }
     }
 
-    // Set defaults if not provided
+    // Defaults are applied AFTER the loop, not inside it. Inside, they fire
+    // on the first iteration - so `--grpc_port=1234 --venues=binance` would
+    // default venues to all three on iteration 1, then APPEND binance on
+    // iteration 2, yielding {binance,bybit,okx,binance} instead of {binance}.
     if (config.venues.empty()) {
         config.venues = {"binance", "bybit", "okx"};
     }
     if (config.instruments.empty()) {
-        config.instruments = {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
+        // BTCUSDT only: main.cpp builds one provider per venue for a single
+        // instrument. ETHUSDT/SOLUSDT exist in InstrumentId, but multi-symbol
+        // is designed for rather than exercised (DESIGN_1 §1.2), so
+        // defaulting to all three would promise something not wired up.
+        config.instruments = {"BTCUSDT"};
     }
-
     return config;
 }
 
 bool ServerConfig::Validate() const {
-    if (interval_ms <= 0) {
-        std::cerr << "Error: interval_ms must be positive\n";
-        return false;
-    }
     if (venues.empty()) {
         std::cerr << "Error: at least one venue required\n";
         return false;
     }
     if (instruments.empty()) {
         std::cerr << "Error: at least one instrument required\n";
+        return false;
+    }
+    if (depth == 0) {
+        std::cerr << "Error: --depth must be greater than zero\n";
         return false;
     }
     return true;

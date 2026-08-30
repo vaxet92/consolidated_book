@@ -1,4 +1,5 @@
 #include "aggregator_service.h"
+#include "config/config.h"
 #include "md_core/md_core.h"
 #include "md_provider/binance/binance_provider.h"
 #include "md_provider/bybit/bybit_provider.h"
@@ -13,8 +14,49 @@
 
 using namespace market_data;
 
-int main() {
-    Logger::Log(LogLevel::kInfo, "[Aggregator] starting");
+namespace {
+
+// Resolves the requested depth to a tier this venue actually publishes, and
+// says so when it cannot reach what was asked for - OKX tops out at 400
+// without VIP4, so a request above that is silently under-delivered unless
+// it is reported.
+uint32_t ResolveDepth(VenueId venue, uint32_t desired) {
+    uint32_t tier = 0;
+    switch (venue) {
+        case VenueId::BINANCE:
+            tier = SelectDepthTier(kBinanceDepthTiers, desired);
+            break;
+        case VenueId::BYBIT:
+            tier = SelectDepthTier(kBybitDepthTiers, desired);
+            break;
+        case VenueId::OKX:
+            tier = SelectDepthTier(kOkxDepthTiers, desired);
+            break;
+        case VenueId::COUNT:
+            tier = desired;
+            break;
+    }
+
+    if (tier < desired) {
+        Logger::Log(LogLevel::kWarning, "[{}] requested depth {} exceeds this venue's deepest tier - using {}",
+                    VenueConverter::ToVenueString(venue), desired, tier);
+    } else if (tier > desired) {
+        Logger::Log(LogLevel::kInfo, "[{}] depth {} rounded up to venue tier {}",
+                    VenueConverter::ToVenueString(venue), desired, tier);
+    }
+    return tier;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    ServerConfig server_config = ServerConfig::ParseFromArgs(argc, argv);
+    if (!server_config.Validate()) {
+        return 2;
+    }
+
+    Logger::Log(LogLevel::kInfo, "[Aggregator] starting (depth={}, grpc_port={})", server_config.depth,
+                server_config.grpc_port);
 
     AggregatorServiceImpl service;
 
@@ -49,6 +91,7 @@ int main() {
         .instrument = InstrumentId::BTCUSDT,
         .host = std::string(kBinanceHost),
         .port = std::string(kBinancePort),
+        .depth = ResolveDepth(VenueId::BINANCE, server_config.depth),
     };
     providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update, on_quote));
 
@@ -57,6 +100,7 @@ int main() {
         .instrument = InstrumentId::BTCUSDT,
         .host = std::string(kBybitHost),
         .port = std::string(kBybitPort),
+        .depth = ResolveDepth(VenueId::BYBIT, server_config.depth),
     };
     providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update, on_quote));
 
@@ -65,6 +109,7 @@ int main() {
         .instrument = InstrumentId::BTCUSDT,
         .host = std::string(kOkxHost),
         .port = std::string(kOkxPort),
+        .depth = ResolveDepth(VenueId::OKX, server_config.depth),
     };
     providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update, on_quote));
 
@@ -72,7 +117,7 @@ int main() {
         provider->Start();
     }
 
-    std::string server_address = "0.0.0.0:50051";
+    std::string server_address = fmt::format("0.0.0.0:{}", server_config.grpc_port);
     grpc::ServerBuilder builder;
     // Insecure credentials: authentication/TLS on the gRPC hop is explicitly
     // out of scope (DESIGN_1 §1.2), not an oversight.

@@ -67,6 +67,10 @@ cmake --preset vcpkg-arm64-debug
 cmake --build build_debug -j
 ```
 
+cmake -S . -B build-debug -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-debug -j
+
+
 Neither `VCPKG_ROOT` nor `ninja` is currently set up in this shell - the
 plain build above is the one that actually works right now.
 
@@ -74,3 +78,11 @@ export CC=/opt/homebrew/opt/llvm/bin/clang
 export CXX=/opt/homebrew/opt/llvm/bin/clang++
 
 clang++ -std=c++20 -fsyntax-only -I. -Imd_core md_core/consolidated_book.cpp 
+
+
+./build/aggregator/aggregator_app
+
+./build/client/client_app --bbo
+./build/client/client_app --notional_band=100K,1M
+./build/client/client_app --price_band=1000
+./build/client/client_app --bbo --volume_bands --price_bands    # all three, one subscription

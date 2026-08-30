@@ -216,6 +216,9 @@ BpsFill FillToBps(const std::vector<MergedLevel>& side, uint32_t bps, bool is_bi
         }
         ++i;
     }
+    // Exiting because the book ended, rather than because a level fell
+    // outside the boundary, means the totals are a lower bound.
+    result.insufficient_depth = (i == side.size());
     if (i == 0) {
         return result;  // nothing within the band
     }
@@ -259,6 +262,7 @@ void FillToBpsBands(const std::vector<MergedLevel>& side, const std::vector<uint
 
         BpsFill result;
         result.limit_price = limit;
+        result.insufficient_depth = (i == side.size());
         if (i > 0) {
             const MergedLevel& last = side[i - 1];
             result.cum_qty = last.cum_qty;

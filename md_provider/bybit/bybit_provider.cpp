@@ -11,7 +11,9 @@ BybitProvider::BybitProvider(const ProviderConfig& config, CallBack callback, Qu
     : Provider(config, std::move(callback), std::move(quote_callback)) {}
 
 std::string BybitProvider::DepthSubscriptionMessage() const {
-    return fmt::format(R"({{"op":"subscribe","args":["orderbook.50.{}"]}})",
+    // Depth is part of the TOPIC NAME on Bybit, not a parameter - already
+    // resolved to a published tier (1/50/200/1000) by SelectDepthTier.
+    return fmt::format(R"({{"op":"subscribe","args":["orderbook.{}.{}"]}})", config.depth,
                        VenueConverter::ToInstrumentString(config.instrument));
 }
 

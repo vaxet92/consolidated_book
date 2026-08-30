@@ -59,9 +59,17 @@ struct Book {
 };
 
 // §5.2: N must cover the deepest question asked - the 50M notional band and
-// the 1000bps price band. Bands will still legitimately exhaust it (1000bps
-// is ~10% away on BTCUSDT), which is reported, not hidden.
-inline constexpr size_t kDefaultMaxDepth = 500;
+// the 1000bps price band.
+//
+// Sized to the depth the venues actually publish, so nothing already in
+// memory is discarded: Bybit orderbook.50 gives 50 levels, OKX books gives
+// 400, Binance's REST snapshot up to 1000 - about 1450 merged. At 500 we
+// were throwing away roughly two thirds of what we already had.
+//
+// Bands will STILL exhaust this, and that is correct rather than a bug:
+// 1000bps is ~10% away on BTCUSDT and no venue publishes anywhere near that
+// far. Exhaustion is reported through insufficient_depth, never hidden.
+inline constexpr size_t kDefaultMaxDepth = 1500;
 
 // Merges into `out`, reusing its buffers. Caller keeps one Book alive across
 // publishes rather than constructing a fresh one each time.
@@ -114,13 +122,23 @@ struct BpsFill {
     QtyUnits cum_qty = 0;
     uint64_t cum_notional = 0;  // USDT x 1e8
     uint32_t level_count = 0;
+
+    // The walk reached the end of the book before crossing limit_price, so
+    // the totals are a LOWER BOUND on the liquidity within the band rather
+    // than the whole of it. Distinguishing the two matters: on BTCUSDT the
+    // wider bands are always truncated, because no venue publishes anything
+    // near 10% of depth, and a truncated result otherwise looks identical to
+    // a complete one.
+    bool insufficient_depth = false;
 };
 
 // `is_bid` picks the direction: bids walk DOWN from the best bid to
 // best_bid x (1 - bps/10000), asks walk UP to best_ask x (1 + bps/10000).
+//
 // Unlike FillToNotional there is no partial level - a level is either inside
-// the boundary or outside it - so there is no insufficient_depth: running out
-// of book simply means fewer levels.
+// the boundary or outside it. Running out of book before reaching the
+// boundary is still reported, via insufficient_depth, because a truncated
+// total is otherwise indistinguishable from a complete one.
 BpsFill FillToBps(const std::vector<MergedLevel>& side, uint32_t bps, bool is_bid);
 
 // One forward walk for every bps band, same reasoning as
