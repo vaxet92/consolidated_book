@@ -25,6 +25,16 @@ class VenueBook {
     InstrumentId instrument() const;
     uint64_t last_seq() const;
 
+    // Arrival time of the last depth update, on OUR monotonic clock. The
+    // staleness watchdog reads this and nothing else.
+    //
+    // KEY: 0 means NEVER HEARD FROM, which is not the same as stale. Every
+    // venue is 0 at startup, and a venue that has never spoken needs a
+    // different operator response than one that spoke and then stopped -
+    // bad config or a rejected subscription, versus a dead feed. The
+    // staleness predicate must keep the two apart.
+    int64_t last_update_mono_ns() const;
+
     const auto& bids() const { return bids_; }
     const auto& asks() const { return asks_; }
 
@@ -35,6 +45,7 @@ class VenueBook {
     VenueId venue_;
     InstrumentId instrument_;
     uint64_t last_seq_ = 0;
+    int64_t last_update_mono_ns_ = 0;  // 0 = never received anything
     OrderBookType<std::greater<PriceTicks>> bids_;  // descending: begin() = best bid
     OrderBookType<std::less<PriceTicks>> asks_;     // ascending: begin() = best ask
 };

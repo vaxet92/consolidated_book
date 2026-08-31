@@ -39,9 +39,29 @@ struct BookUpdate {
     // id in the event). 0 when the venue has no such field - Bybit chains
     // by u+1 instead. Signed because OKX uses -1.
     int64_t prev_seq = 0;
-    int64_t recv_ts_ns;  // CLOCK_MONOTONIC, ours. Signed: used in drift subtraction.
-    int64_t exch_ts_ns;  // venue's own timestamp - drift estimation only, never compared across venues.
-    bool is_snapshot;    // true = full replace, false = incremental delta
+    // TWO receive stamps, deliberately. They answer different questions and
+    // need different clocks.
+    //
+    // recv_ts_ns is WALL clock: the only thing it is subtracted from is
+    // exch_ts_ns, the venue's own wall clock, and it is what goes on the
+    // wire. It can jump - NTP, an operator, a VM resume.
+    //
+    // KEY: recv_mono_ns is monotonic and is the ONLY stamp the staleness
+    // watchdog may use. Staleness is `now_mono - recv_mono_ns`; both
+    // readings come from the same never-jumping clock, so the clock offset
+    // cancels exactly. With recv_ts_ns instead, an NTP step backwards blinds
+    // the watchdog, and a step forwards marks every venue stale at once and
+    // publishes an empty book that looks like a total exchange outage.
+    //
+    // KEY: never use recv_ts_ns - exch_ts_ns as a staleness measure. Our
+    // clock and the venue's are not synchronised, so that difference is
+    // staleness PLUS an unknown clock offset PLUS network delay - three
+    // unknowns, one equation. Fit for drift estimation only, never for
+    // admission to the merge.
+    int64_t recv_ts_ns;         // ours, wall clock. Signed: used in drift subtraction.
+    int64_t exch_ts_ns;         // venue's own timestamp - drift estimation only, never compared across venues.
+    int64_t recv_mono_ns = 0;   // ours, monotonic. Staleness only.
+    bool is_snapshot;           // true = full replace, false = incremental delta
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
 };
@@ -53,9 +73,14 @@ struct BookUpdate {
 struct BboQuote {
     VenueId venue;
     InstrumentId instrument;
-    uint64_t seq = 0;        // venue-native: Binance `u`, Bybit `seq`, OKX `seqId`
-    int64_t recv_ts_ns = 0;  // ours, stamped by the provider
-    int64_t exch_ts_ns = 0;  // venue's, where available (Binance bookTicker has none)
+    uint64_t seq = 0;          // venue-native: Binance `u`, Bybit `seq`, OKX `seqId`
+    // Same two-clock split as BookUpdate above, and for the same reasons.
+    // The depth and fast-BBO streams are separate sockets, so their
+    // staleness is tracked independently - one can die while the other
+    // keeps streaming.
+    int64_t recv_ts_ns = 0;    // ours, wall clock. Stamped by the provider.
+    int64_t exch_ts_ns = 0;    // venue's, where available (Binance bookTicker has none)
+    int64_t recv_mono_ns = 0;  // ours, monotonic. Staleness only.
     PriceTicks bid_price = 0;
     QtyUnits bid_qty = 0;
     PriceTicks ask_price = 0;

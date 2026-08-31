@@ -105,11 +105,17 @@ class Provider {
     // Runs on this provider's own thread - must become a queue push instead
     // of a direct call once providers run concurrently with the
     // consolidator (see our discussion on CallBack being a temporary shape).
-    void Emit(const BookUpdate& update);
+    //
+    // Takes a NON-CONST reference because it stamps recv_mono_ns on the way
+    // out. Stamping here rather than in each of the six message handlers
+    // means no venue can forget it and no venue can do it differently. A
+    // const& would force a copy of the update instead - two vectors, one
+    // heap allocation per message, which is what §7.5 rules out.
+    void Emit(BookUpdate& update);
 
     // Called by child classes with a top-of-book quote from the fast-BBO
-    // stream. Same threading caveat as Emit().
-    void EmitQuote(const BboQuote& quote);
+    // stream. Same threading caveat and same stamping reason as Emit().
+    void EmitQuote(BboQuote& quote);
 
     // Called by a child class when it detects a sequence gap on the depth
     // stream: the book is now WRONG (DESIGN_1 §4.2 - strictly worse than
@@ -146,8 +152,19 @@ class Provider {
     // in-channel snapshot.
     virtual void OnReconnect() {}
 
-    // Get current timestamp in milliseconds
+    // Wall clock, in milliseconds. Feeds BookUpdate/BboQuote::recv_ts_ns,
+    // which is compared against the venue's exch_ts_ns and goes on the wire.
+    // Note the resolution is 1ms even though the field it fills is named _ns.
     static int64_t GetCurrentTimeMs();
+
+    // KEY: steady_clock, NOT system_clock. Feeds recv_mono_ns and nothing
+    // else. The staleness watchdog subtracts two of these, so the clock must
+    // never jump: a wall-clock step backwards would blind the watchdog, and a
+    // step forwards would mark every venue stale at once. Its epoch is
+    // arbitrary and machine-local - only DIFFERENCES between two readings
+    // mean anything, so never put this value on the wire or in a log where it
+    // could be read as a time of day.
+    static int64_t GetMonotonicNs();
 
     const ProviderConfig config;
     std::atomic<bool> running;

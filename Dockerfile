@@ -7,10 +7,11 @@
 FROM ubuntu:24.04 AS builder
 
 # ninja + pkg-config for the build; git/curl/zip/tar for vcpkg's fetching;
-# ca-certificates so vcpkg can clone over HTTPS.
+# ca-certificates so vcpkg can clone over HTTPS. ccache persists compiled
+# object files across builds (see the build step below).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build git curl zip unzip tar pkg-config \
-        ca-certificates linux-libc-dev \
+        ca-certificates linux-libc-dev ccache \
     && rm -rf /var/lib/apt/lists/*
 
 ENV VCPKG_ROOT=/opt/vcpkg
@@ -48,9 +49,26 @@ COPY aggregator/ aggregator/
 COPY client/ client/
 COPY tests/ tests/
 
-RUN cmake -S . -B build -G Ninja \
+# VCPKG_MANIFEST_INSTALL=OFF: the dependency layer above already ran
+# `vcpkg install` into /src/vcpkg_installed. Without this flag the vcpkg
+# toolchain runs `install` AGAIN at CMake configure time. That rerun is not
+# guaranteed to hit the binary cache, so it can rebuild gRPC/Boost from source
+# - 15+ min - on every single source edit. OFF makes CMake trust the tree that
+# is already there; VCPKG_INSTALLED_DIR points it at that tree.
+#
+# The two cache mounts stay as a safety net (a stray manifest change still
+# lands in the persistent binary cache instead of the layer). CCACHE_DIR is a
+# cache mount too: after this, fixing one .cpp recompiles one file, not all 52.
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/vcpkg,sharing=locked \
+    --mount=type=cache,target=/root/.cache/ccache \
+    cmake -S . -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake \
+        -DVCPKG_MANIFEST_INSTALL=OFF \
+        -DVCPKG_INSTALLED_DIR=/src/vcpkg_installed \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
     && cmake --build build -j
 
 # ---------- runtime ----------

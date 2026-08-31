@@ -24,6 +24,9 @@ InstrumentId VenueBook::instrument() const {
 uint64_t VenueBook::last_seq() const {
     return last_seq_;
 }
+int64_t VenueBook::last_update_mono_ns() const {
+    return last_update_mono_ns_;
+}
 
 template <typename Compare>
 void VenueBook::ApplySide(OrderBookType<Compare>& side, const std::vector<PriceLevel>& levels) {
@@ -37,6 +40,12 @@ void VenueBook::ApplySide(OrderBookType<Compare>& side, const std::vector<PriceL
 }
 
 void VenueBook::ApplyUpdate(const BookUpdate& update) {
+    // Recorded here rather than in Core's dispatch: ApplyUpdate is only
+    // reached by a real, sequence-validated depth message. Pings, pongs and
+    // subscribe acks never get this far, so the "a heartbeat must not feed
+    // the watchdog" rule holds by construction instead of by remembering.
+    last_update_mono_ns_ = update.recv_mono_ns;
+
     if (update.is_snapshot) {
         bids_.clear();
         asks_.clear();

@@ -12,6 +12,7 @@ add_executable(unit_tests
     src/test_continuity.cpp
     src/test_seq_dedup.cpp
     src/test_consolidated_book.cpp
+    src/test_venue_health.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE
