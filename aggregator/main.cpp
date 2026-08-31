@@ -9,7 +9,9 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 using namespace market_data;
@@ -41,8 +43,8 @@ uint32_t ResolveDepth(VenueId venue, uint32_t desired) {
         Logger::Log(LogLevel::kWarning, "[{}] requested depth {} exceeds this venue's deepest tier - using {}",
                     VenueConverter::ToVenueString(venue), desired, tier);
     } else if (tier > desired) {
-        Logger::Log(LogLevel::kInfo, "[{}] depth {} rounded up to venue tier {}",
-                    VenueConverter::ToVenueString(venue), desired, tier);
+        Logger::Log(LogLevel::kInfo, "[{}] depth {} rounded up to venue tier {}", VenueConverter::ToVenueString(venue),
+                    desired, tier);
     }
     return tier;
 }
@@ -55,8 +57,10 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    Logger::Log(LogLevel::kInfo, "[Aggregator] starting (depth={}, grpc_port={})", server_config.depth,
-                server_config.grpc_port);
+    // connections is worth logging: at N it opens N x venues x 2 sockets, so
+    // the number needs to be visible when a venue starts refusing us.
+    Logger::Log(LogLevel::kInfo, "[Aggregator] starting (depth={}, connections={}, grpc_port={})", server_config.depth,
+                server_config.connections, server_config.grpc_port);
 
     AggregatorServiceImpl service;
 
@@ -75,8 +79,29 @@ int main(int argc, char* argv[]) {
             service.PublishBook(instrument, std::move(book));
         });
 
+    // --venues= selects which exchanges to run. ParseFromArgs already fills
+    // in all three when the flag is absent, so "empty" here can only mean the
+    // operator named venues we do not recognise - worth refusing rather than
+    // silently starting an aggregator with no data source.
+    auto venue_enabled = [&server_config](std::string_view name) {
+        return std::find(server_config.venues.begin(), server_config.venues.end(), name) != server_config.venues.end();
+    };
+
+    std::vector<VenueId> enabled_venues;
+    if (venue_enabled("binance")) enabled_venues.push_back(VenueId::BINANCE);
+    if (venue_enabled("bybit")) enabled_venues.push_back(VenueId::BYBIT);
+    if (venue_enabled("okx")) enabled_venues.push_back(VenueId::OKX);
+
+    if (enabled_venues.empty()) {
+        Logger::Log(LogLevel::kError, "[Aggregator] no recognised venue in --venues (expected binance, bybit, okx),");
+        return 2;
+    }
+
+    // Core must be told the SAME set. A venue enabled here but never fed
+    // contributes nothing to the merge, so the output stays correct - but the
+    // two lists disagreeing is the kind of thing that silently costs a venue.
     CoreConfig config = {
-        .venues = {VenueId::BINANCE, VenueId::BYBIT, VenueId::OKX},
+        .venues = enabled_venues,
         .default_instruments = {InstrumentId::BTCUSDT},
     };
     core.Init(config);
@@ -86,32 +111,45 @@ int main(int argc, char* argv[]) {
 
     std::vector<std::unique_ptr<Provider>> providers;
 
-    ProviderConfig binance_config = {
-        .venue_id = VenueId::BINANCE,
-        .instrument = InstrumentId::BTCUSDT,
-        .host = std::string(kBinanceHost),
-        .port = std::string(kBinancePort),
-        .depth = ResolveDepth(VenueId::BINANCE, server_config.depth),
-    };
-    providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update, on_quote));
+    if (venue_enabled("binance")) {
+        ProviderConfig binance_config = {
+            .venue_id = VenueId::BINANCE,
+            .instrument = InstrumentId::BTCUSDT,
+            .host = std::string(kBinanceHost),
+            .port = std::string(kBinancePort),
+            .depth = ResolveDepth(VenueId::BINANCE, server_config.depth),
+            // Same count for every venue. Per-venue tuning may eventually be
+            // needed - OKX rate-limits connection ATTEMPTS more tightly than the
+            // others - but no venue's limits have been verified, so three
+            // unverified numbers would be guessing where one is defensible.
+            .connections = server_config.connections,
+        };
+        providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update, on_quote));
+    }
 
-    ProviderConfig bybit_config = {
-        .venue_id = VenueId::BYBIT,
-        .instrument = InstrumentId::BTCUSDT,
-        .host = std::string(kBybitHost),
-        .port = std::string(kBybitPort),
-        .depth = ResolveDepth(VenueId::BYBIT, server_config.depth),
-    };
-    providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update, on_quote));
+    if (venue_enabled("bybit")) {
+        ProviderConfig bybit_config = {
+            .venue_id = VenueId::BYBIT,
+            .instrument = InstrumentId::BTCUSDT,
+            .host = std::string(kBybitHost),
+            .port = std::string(kBybitPort),
+            .depth = ResolveDepth(VenueId::BYBIT, server_config.depth),
+            .connections = server_config.connections,
+        };
+        providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update, on_quote));
+    }
 
-    ProviderConfig okx_config = {
-        .venue_id = VenueId::OKX,
-        .instrument = InstrumentId::BTCUSDT,
-        .host = std::string(kOkxHost),
-        .port = std::string(kOkxPort),
-        .depth = ResolveDepth(VenueId::OKX, server_config.depth),
-    };
-    providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update, on_quote));
+    if (venue_enabled("okx")) {
+        ProviderConfig okx_config = {
+            .venue_id = VenueId::OKX,
+            .instrument = InstrumentId::BTCUSDT,
+            .host = std::string(kOkxHost),
+            .port = std::string(kOkxPort),
+            .depth = ResolveDepth(VenueId::OKX, server_config.depth),
+            .connections = server_config.connections,
+        };
+        providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update, on_quote));
+    }
 
     for (auto& provider : providers) {
         provider->Start();

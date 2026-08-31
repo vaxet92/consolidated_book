@@ -1,7 +1,5 @@
 # md_provider/CMakeLists.txt
 
-cmake_policy(SET CMP0167 NEW)
-
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(OpenSSL REQUIRED)
 find_package(simdjson CONFIG REQUIRED)
@@ -9,6 +7,7 @@ find_package(simdjson CONFIG REQUIRED)
 add_library(md_provider STATIC
     md_provider.cpp
     continuity.cpp
+    seq_dedup.cpp
     ws/ws.cpp
     binance/binance_provider.cpp
     binance/binance_parser.cpp

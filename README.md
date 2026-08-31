@@ -14,21 +14,81 @@ Four services:
 
 The three `*_sub` binaries exist to exercise one feed in isolation while debugging. `client_app` is what actually ships — all four share `client_common` for connection handling, gap detection and formatting.
 
-> **Status: working end-to-end against live exchange data.** All three feeds publish. Docker, benchmarks, and the staleness policy are not built — see [Known limitations](#known-limitations).
+> **Status: working end-to-end against live exchange data.** All three feeds publish, and the whole system runs under docker-compose. Benchmarks and the staleness policy are not built — see [Known limitations](#known-limitations).
 
 ---
 
 ## Build
 
-*(to be completed)*
+**Docker (recommended)** — nothing to install but Docker itself:
+
+```bash
+docker compose up --build
+```
+
+The first build takes roughly 30–60 minutes: gRPC, Boost, OpenSSL and Protobuf all compile from source inside the image. Later builds reuse that layer, and a BuildKit cache mount keeps the vcpkg binary cache outside the layer so even a `vcpkg.json` change rebuilds only the new package.
+
+**Native** — needs CMake ≥ 3.20, a C++20 compiler, and [vcpkg](https://github.com/microsoft/vcpkg):
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
 
 ## Run
 
-*(to be completed)*
+`docker compose up` starts four containers — the aggregator plus three clients, each subscribing to a different feed:
+
+```bash
+docker compose up --build          # everything
+docker compose logs -f client-bbo  # follow one client
+```
+
+All three client containers run the **same** `client_app` binary with different flags; that is the point of the flag-driven design.
+
+To run the pieces by hand:
+
+```bash
+./build/aggregator/aggregator_app --depth=500
+
+./build/client/client_app --bbo
+./build/client/client_app --notional_band=1M,5M,10M,25M,50M
+./build/client/client_app --price_band=50,100,200,500,1000
+```
 
 ## Configuration
 
-*(to be completed)*
+**`aggregator_app`**
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--venues=` | `binance,bybit,okx` | Which exchanges to connect to |
+| `--instruments=` | `BTCUSDT` | Symbols. Multi-symbol is designed for, not exercised |
+| `--grpc_port=` | `50051` | gRPC listen port |
+| `--depth=` | `500` | Desired book depth. Each venue rounds **up** to its nearest published tier, or falls back to its deepest — OKX caps at 400 |
+| `--connections=` | `1` | Redundant sockets per stream, per venue. See [Redundant connections](#redundant-connections). Rejected above 8 |
+
+**`client_app`** — at least one feed flag is required:
+
+| Flag | Meaning |
+|---|---|
+| `--server=` | Aggregator address, default `localhost:50051` (compose uses `aggregator:50051`) |
+| `--symbol=` | Symbol to subscribe to, default `BTCUSDT` |
+| `--bbo` | Consolidated best bid/offer with per-venue attribution |
+| `--notional_band=` | Comma-separated USDT targets, e.g. `1M,5M,10M`. VWAP, worst price, level count and slippage in bps |
+| `--price_band=` | Comma-separated bps offsets from the top, e.g. `50,100,500`. Liquidity available within each band |
+| `--volume_bands` | Volume bands at the server's default thresholds |
+| `--price_bands` | Price bands at the server's default thresholds |
+
+Notional values take `K`/`M` suffixes. A bare number is **dollars**, so `--notional_band=1` sweeps one dollar of the book, not one million.
+
+Flags combine — one client can take every feed at once:
+
+```bash
+./build/client/client_app --bbo --volume_bands --price_bands
+```
 
 ---
 
@@ -229,11 +289,29 @@ A sequence gap means the book is *wrong*, which is worse than stale, so it trigg
 
 **OKX's CRC32 is gone.** This document previously described verifying it on every message as free end-to-end validation. OKX has since deprecated it: the field is still present but its **value is fixed to 0**, and they direct users to `seqId`/`prevSeqId` instead. Consequence worth stating plainly — no venue now offers a per-message check against its own book, so a *misapplied* update (as opposed to a *missed* one) has no live detector. That makes the unbuilt fast-BBO oracle more valuable than when it was first written down.
 
-## Record and replay
+## Redundant connections
 
-**Not built.** The intent was a capture tool recording raw exchange frames with arrival timestamps, and a replay provider feeding them back through the same parsing path — giving repeatable tests for the book logic, sequencing state machines and band math, plus a docker-compose profile that runs with no network access at all.
+**`--connections=N` opens N sockets per stream per venue. The first copy of each message wins, the rest are dropped.** Default 1 — redundancy is opt-in, so the default configuration cannot trip a venue's connection limit.
 
-What exists instead: unit tests drive the parsers, sequencing rules and band math directly with hand-built inputs, including real captured payloads pasted into the parser tests. That covers the logic but not timing, and it means nothing exercises the full pipeline deterministically.
+The benefit is **failover**: one socket dies, the others are already delivering — no gap, no resync, no REST refetch. A latency benefit is **not** claimed; these sockets share one NIC and one route, so they are not independent paths, and it is not measured. The technique is called line arbitration.
+
+Dedup is one integer compare ([`seq_dedup.h`](md_provider/seq_dedup.h)) — keep the highest venue id accepted, drop anything at or below it. 18 bytes of state per stream.
+
+Three rules, each load-bearing:
+
+1. **After parse, before the continuity check.** A duplicate reaching continuity looks like a sequence break and resyncs — three connections would cause two spurious resyncs per message.
+2. **`<=`, not `!=`.** One `io_context` reads all N sockets and processes whatever is ready, so one socket delivering 4057 *and* 4058 before another delivers 4057 is ordinary event-loop batching. `!=` accepts the late duplicate.
+3. **A reconnecting socket's snapshot is suppressed.** Bybit and OKX greet a new socket with a snapshot whose id is *behind* the others; honouring it moves the mark backwards and the next healthy message reads as a gap.
+
+A *genuine* venue reset (OKX maintenance, Bybit `u == 1`) does move the mark backwards — and keeping that message's own id is what stops the other sockets' copies from each re-applying a snapshot.
+
+**Failure mode:** if a real reset is never reported, every later id sits below the mark and the book freezes silently. `LooksStuck()` logs once after 1000 consecutive drops.
+
+**Rejected — a hash set of seen ids.** Handles missing or out-of-order ids, but costs 8–46 MB and a tuning constant for generality we do not need: all six streams carry a monotonic id.
+
+**Rejected — hashing the `(prevSeqId, seqId)` pair.** Survives the reset message, then fails on the next one — after a reset the stream replays pairs already seen.
+
+**Cost:** N× bandwidth and N× TLS decrypt. Parse cost does not scale, since duplicates die before the book work. Venue connection limits are **not verified**; `--connections` is capped at 8 so a typo cannot open 1800 sockets.
 
 ---
 
@@ -256,15 +334,16 @@ Everything here is a **known cost accepted deliberately**, not an oversight. Non
 # Known limitations
 
 **Not built:**
-- **Docker and docker-compose** — a required deliverable, missing.
 - **Benchmarks.** No before-numbers exist, so every performance statement in this document is an estimate and is labelled as such.
 - **Staleness policy** (§6): the watchdog, drift detector and admission rule. `VenueStatus` exists on the wire but is never populated — a stale venue still contributes silently.
 - **The fast-BBO oracle** (§4.4): comparing the depth-derived BBO against the venues' own BBO channels to detect a desynced book. This matters more than planned, because OKX **deprecated its CRC32 checksum** (now fixed at 0), removing the only per-message integrity check any venue offered. Gap detection catches *missed* messages, not *misapplied* ones.
-- **Record and replay**, and the offline compose profile that depended on it.
+- **Record and replay** — capturing raw exchange frames and feeding them back through the same parsers, giving reproducible full-pipeline runs and an offline compose profile. Dropped deliberately: the components are unit-tested individually, and the time went to redundant connections instead. The cost is that nothing exercises the whole pipeline deterministically, so a bug seen against live data cannot be reproduced.
+- **Per-session reconnect.** With `--connections>1`, a dead socket is replaced only once *every* socket on the provider is gone — `io_context::run()` returns only when no work remains. The loss is logged (`all depth connections down`) but nothing acts on it.
 - **Graceful shutdown** — no signal handling; the process only stops on an external kill, which skips provider teardown.
 - Unary `GetSnapshot`, and `throttle_ms`.
 
 **Working, with caveats:**
+- `--connections>1` has not been run against live venues. The failure to watch for is a venue refusing the extra sockets, since none of their limits have been verified.
 - Single symbol in practice, though the code and protocol are parameterized for more.
 - The 1000bps band cannot be covered by the public depth channels at any depth setting — no venue publishes 10% of book. Reported with `insufficient_depth` rather than presented as complete.
 - Venue attribution is carried at *every* merged level but only exposed for the BBO. Surfacing it per band is a proto field and an accumulator away; the partial-fill level would need a stated attribution rule.

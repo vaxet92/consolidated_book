@@ -119,12 +119,29 @@ bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
     return true;
 }
 
-void BinanceProvider::OnDepthMessage(const std::string& message) {
+void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_index) {
     auto update = ParseBinanceDepthMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a depth update (e.g. a control/ack message)
     }
     update->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+
+    // Redundant-connection dedup, BEFORE the sync branch below - not after.
+    //
+    // KEY: during kSyncing every event is buffered into pending_, so a
+    // duplicate reaching that branch would be buffered too, and
+    // ReconcileSnapshot would emit each event N times when it drains. Worse,
+    // pending_ is capped at kMaxPendingEvents: with three connections it
+    // would fill three times faster and trip the "buffered too long,
+    // resyncing" path during the exact window where the REST snapshot is
+    // still in flight.
+    //
+    // venue_reset is always false here. Binance never sends a snapshot on the
+    // stream - the book is seeded from REST - so the id only climbs and the
+    // high-water mark never has to move backwards.
+    if (!AcceptDepth(update->seq, conn_index, /*venue_reset=*/false)) {
+        return;
+    }
 
     if (sync_state_ == SyncState::kSyncing) {
         // Subscribe-and-buffer FIRST, snapshot second (§4.2). The fetch is
@@ -155,11 +172,19 @@ void BinanceProvider::OnDepthMessage(const std::string& message) {
     Emit(*update);
 }
 
-void BinanceProvider::OnBboMessage(const std::string& message) {
+void BinanceProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {
     auto quote = ParseBinanceBboMessage(message, config.venue_id, config.instrument);
     if (!quote) {
         return;  // not a bookTicker payload (e.g. a subscribe ack)
     }
+
+    // Separate filter from the depth stream: @bookTicker and @depth carry
+    // independent `u` sequences, so a shared high-water mark would silently
+    // drop one stream behind the other.
+    if (!AcceptBbo(quote->seq, conn_index)) {
+        return;
+    }
+
     quote->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
     EmitQuote(*quote);
 }

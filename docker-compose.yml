@@ -1,0 +1,61 @@
+# One image, four processes. The aggregator connects out to the exchanges and
+# serves gRPC; each client connects in by service name.
+#
+#   docker compose up --build
+#
+# The first build is slow (~30-60 min): gRPC, Boost, OpenSSL and Protobuf all
+# compile from source inside the image. Subsequent builds reuse that layer.
+
+# Every service shares one build definition and one image tag. The build block
+# has to be repeated (via this anchor) rather than declared only on the
+# aggregator: a service with `image:` but no `build:` is one compose tries to
+# PULL from a registry, which fails for an image that only exists locally.
+# With identical build config and tag, it is built once and the layer cache
+# makes the rest instant.
+x-app: &app
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: consolidated-book:latest
+  # Never consult a registry: this image only ever exists locally, and the
+  # default policy produces a confusing "pull access denied" instead of just
+  # building it.
+  pull_policy: build
+  restart: unless-stopped
+
+services:
+  aggregator:
+    <<: *app
+    container_name: aggregator
+    command: ["./aggregator_app", "--depth=500"]
+    ports:
+      # Published so native clients on the host can also reach it. The
+      # containerized clients do not need this - they use the compose network
+      # and the service name instead.
+      - "50051:50051"
+
+  # The three client services all run the SAME binary (client_app) with
+  # different flags. That is the point of the flag-driven design: one
+  # production client, three subscriptions.
+  #
+  # depends_on only waits for the aggregator container to START, not for gRPC
+  # to be listening. No healthcheck is needed: client_app already reconnects
+  # with exponential backoff, so the first few seconds of connection failures
+  # in the logs are expected rather than a fault.
+  client-bbo:
+    <<: *app
+    container_name: client-bbo
+    depends_on: [aggregator]
+    command: ["./client_app", "--server=aggregator:50051", "--bbo"]
+
+  client-volume-bands:
+    <<: *app
+    container_name: client-volume-bands
+    depends_on: [aggregator]
+    command: ["./client_app", "--server=aggregator:50051", "--notional_band=1M,5M,10M,25M,50M"]
+
+  client-price-bands:
+    <<: *app
+    container_name: client-price-bands
+    depends_on: [aggregator]
+    command: ["./client_app", "--server=aggregator:50051", "--price_band=50,100,200,500,1000"]

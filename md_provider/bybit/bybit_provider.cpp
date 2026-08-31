@@ -22,10 +22,32 @@ std::string BybitProvider::BboSubscriptionMessage() const {
                        VenueConverter::ToInstrumentString(config.instrument));
 }
 
-void BybitProvider::OnDepthMessage(const std::string& message) {
+void BybitProvider::OnDepthMessage(const std::string& message, uint32_t conn_index) {
     auto update = ParseBybitOrderbookMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not an orderbook message (e.g. subscribe ack, pong)
+    }
+
+    // Redundant-connection dedup. Placement is the whole thing: AFTER the
+    // parse, because the reset flag needs the parsed message, and BEFORE the
+    // continuity check, because a duplicate looks to CheckBybitContinuity
+    // like u != last_u + 1 - which it reports as a gap and resyncs on. Three
+    // connections would then cause two spurious resyncs per message.
+    //
+    // KEY: only the u == 1 SERVICE RESTART counts as a venue reset - that is
+    // the one case where the id genuinely moves backwards. An ordinary
+    // snapshot must pass false: its id moves forward, so the `<=` rule
+    // decides correctly on its own (newer than us, apply; older, drop).
+    //
+    // Passing update->is_snapshot here instead caused a live gap. All three
+    // sockets are created before any connects, so a socket that connects LAST
+    // opened with a snapshot behind the others, was honoured as a reset, and
+    // dragged the high-water mark backwards - after which the next healthy
+    // message read as a forward gap and resynced.
+    const bool venue_reset = (update->seq == 1);
+
+    if (!AcceptDepth(update->seq, conn_index, venue_reset)) {
+        return;
     }
 
     switch (CheckBybitContinuity(*update, last_depth_u_)) {
@@ -49,10 +71,17 @@ void BybitProvider::OnDepthMessage(const std::string& message) {
     Emit(*update);
 }
 
-void BybitProvider::OnBboMessage(const std::string& message) {
+void BybitProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {
     auto update = ParseBybitOrderbookMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not an orderbook message (e.g. subscribe ack, pong)
+    }
+
+    // Separate filter from the depth stream: orderbook.1 and orderbook.50
+    // carry independent `u` sequences, so a shared high-water mark would
+    // silently drop one stream behind the other.
+    if (!AcceptBbo(update->seq, conn_index)) {
+        return;
     }
 
     // orderbook.1 sends every message as "type":"snapshot" with both sides

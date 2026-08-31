@@ -40,11 +40,11 @@ struct ClientConfig {
     static ClientConfig ParseFromArgs(int argc, char* argv[]);
 
     // Turns this config into the wire request, applying the presence rules.
-    [[nodiscard]] wire::SubscribeRequest ToRequest() const;
+    wire::SubscribeRequest ToRequest() const;
 
     // False when no feed was requested - the server would reject it, so the
     // caller can fail early with a usage message instead.
-    [[nodiscard]] bool HasAnyFeed() const { return want_bbo || want_volume_bands || want_price_bands; }
+    bool HasAnyFeed() const { return want_bbo || want_volume_bands || want_price_bands; }
 };
 
 void PrintUsage(const char* program_name);

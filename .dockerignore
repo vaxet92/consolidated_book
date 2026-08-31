@@ -1,0 +1,36 @@
+# The host build tree must never enter the image: it holds macOS/arm64 objects
+# and a vcpkg_installed/ built for the host triplet. Copying it in would both
+# bloat the context by gigabytes and risk CMake reusing host artifacts.
+build/
+build-debug/
+cmake-build-*/
+out/
+vcpkg_installed/
+
+# CMake scratch
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+.cmake/
+.cache/
+
+# Docs and VCS - not needed to compile, and they change often enough to
+# invalidate layers for no reason.
+.git/
+.github/
+docs/
+*.md
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Build outputs
+*.o
+*.a
+*.so
+*.dylib

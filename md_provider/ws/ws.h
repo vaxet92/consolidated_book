@@ -35,7 +35,34 @@ class WebSocketSessionSSL : public std::enable_shared_from_this<WebSocketSession
     void Run(const char* inHost, const char* inPort, const char* inTarget, std::string subscribeMessage = "");
     void Stop();
 
+    // Called once when this session terminates for any reason the owner did
+    // not ask for: connect/handshake failure, read error, or the venue
+    // closing on us. NOT called after Stop() - a deliberate shutdown is not
+    // something to reconnect from.
+    //
+    // Fires on the io_context thread, from inside a completion handler. The
+    // owner must not block in it, and must not destroy this session from it -
+    // post the reconnect instead.
+    //
+    // Set after construction rather than passed in, so the owner can capture
+    // per-session state (such as a connection index) in the lambda while
+    // building sessions in a loop.
+    void SetOnClosed(std::function<void()> callback) { on_closed_ = std::move(callback); }
+
    private:
+    // Fires on_closed_ at most once, and never after Stop().
+    //
+    // KEY: once-only matters because the far end of this callback opens a
+    // replacement socket. A session that notified twice would leave the
+    // provider holding two sockets for one dead connection, and the count
+    // would drift upward on every flap - eventually past the venue's
+    // connection limit, which is the failure redundancy exists to avoid.
+    //
+    // KEY: silent after Stop() for the mirror reason. During shutdown every
+    // session dies; if each asked to be reconnected the process would never
+    // exit.
+    void NotifyClosed();
+
     void OnResolve(beast::error_code ec, tcp::resolver::results_type results);
     void OnConnect(beast::error_code ec, tcp::resolver::results_type::endpoint_type ep);
     void OnSslHandshake(beast::error_code ec);
@@ -51,6 +78,8 @@ class WebSocketSessionSSL : public std::enable_shared_from_this<WebSocketSession
     std::string target;
     std::string subscribe_message_;
     std::function<void(const std::string&)> onMessageCallback;
+    std::function<void()> on_closed_;
+    bool closed_notified_ = false;
     bool stopped;
 };
 

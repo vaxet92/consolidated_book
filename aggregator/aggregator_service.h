@@ -52,7 +52,7 @@ class AggregatorServiceImpl final : public wire::Aggregator::Service {
         // something (§9.3). A counter shared across sessions would make
         // every client report gaps caused by traffic sent to other clients.
         // Mutated only under sessions_mutex_, so it needs no atomic.
-        uint64_t next_seq = 0;
+        uint64_t next_seq{};
     };
 
     uint64_t RegisterSession(Subscription subscription);
@@ -60,7 +60,7 @@ class AggregatorServiceImpl final : public wire::Aggregator::Service {
 
     std::mutex sessions_mutex_;
     std::unordered_map<uint64_t, Subscription> sessions_;
-    uint64_t next_session_id_ = 0;
+    uint64_t next_session_id_{1};
 };
 
 }  // namespace market_data

@@ -173,7 +173,6 @@ Follow the Google C++ Style Guide unless the project explicitly defines a differ
 - Use std::unique_ptr for exclusive ownership and std::shared_ptr only when shared ownership is actually required.
 - Prefer references or pointers for non-owning access.
 - Prefer enum class over unscoped enum.
-- Use [[nodiscard]] where ignoring a return value could hide an error.
 - Prefer std::optional for an explicitly optional value rather than sentinel values.
 - Use std::expected for recoverable errors when it improves the API and is consistent with the existing project design.
 

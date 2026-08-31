@@ -12,8 +12,8 @@ class OKXProvider : public Provider {
     ~OKXProvider() override = default;
 
    protected:
-    void OnDepthMessage(const std::string& message) override;
-    void OnBboMessage(const std::string& message) override;
+    void OnDepthMessage(const std::string& message, uint32_t conn_index) override;
+    void OnBboMessage(const std::string& message, uint32_t conn_index) override;
 
     // OKX uses one generic public endpoint - both depth and BBO need an
     // explicit {"op":"subscribe",...} frame after connecting.

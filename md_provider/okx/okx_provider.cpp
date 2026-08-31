@@ -36,10 +36,32 @@ std::string OKXProvider::BboSubscriptionMessage() const {
                        ToOkxInstId(config.instrument));
 }
 
-void OKXProvider::OnDepthMessage(const std::string& message) {
+void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index) {
     auto update = ParseOkxBooksMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a books update (e.g. subscribe ack, pong)
+    }
+
+    // KEY: only the documented MAINTENANCE RESET counts - seqId jumps
+    // backwards while prevSeqId still chains (prevSeqId=15, seqId=3). It is
+    // not a gap (CheckOkxContinuity below treats it as kApply), but it does
+    // put the id under our high-water mark, and without this flag the filter
+    // would drop it and every message after it, forever, with nothing logged.
+    // That is the silent freeze SeqDedup::LooksStuck() guards against.
+    //
+    // An ordinary snapshot (prevSeqId == -1) is deliberately NOT included.
+    // Its seqId moves forward, so the `<=` rule already decides correctly, and
+    // flagging it as a reset let a late-connecting socket's stale snapshot
+    // drag the mark backwards - the live Bybit gap we hit.
+    //
+    // prev_seq > 0, not >= 0: -1 is the snapshot marker and 0 is what the
+    // parser writes when the field is missing. Treating a parse failure as a
+    // reset would be worse than treating it as a normal message.
+    const bool venue_reset =
+        (update->prev_seq > 0 && update->seq < static_cast<uint64_t>(update->prev_seq));
+
+    if (!AcceptDepth(update->seq, conn_index, venue_reset)) {
+        return;
     }
 
     switch (CheckOkxContinuity(*update, last_depth_seq_)) {
@@ -62,10 +84,17 @@ void OKXProvider::OnDepthMessage(const std::string& message) {
     Emit(*update);
 }
 
-void OKXProvider::OnBboMessage(const std::string& message) {
+void OKXProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {
     auto update = ParseOkxBboMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a bbo-tbt payload (e.g. subscribe ack, pong)
+    }
+
+    // Separate filter from the depth stream: bbo-tbt and books carry
+    // independent seqId sequences, so a shared high-water mark would silently
+    // drop one stream behind the other.
+    if (!AcceptBbo(update->seq, conn_index)) {
+        return;
     }
 
     // bbo-tbt always carries both sides, one level each (verified against

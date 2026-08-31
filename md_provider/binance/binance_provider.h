@@ -12,8 +12,8 @@ class BinanceProvider : public Provider {
     ~BinanceProvider() override = default;
 
    protected:
-    void OnDepthMessage(const std::string& message) override;
-    void OnBboMessage(const std::string& message) override;
+    void OnDepthMessage(const std::string& message, uint32_t conn_index) override;
+    void OnBboMessage(const std::string& message, uint32_t conn_index) override;
     void OnReconnect() override;
 
     // Binance connects directly to a per-stream URL (e.g. /ws/btcusdt@depth@100ms) -

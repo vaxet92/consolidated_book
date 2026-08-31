@@ -25,9 +25,22 @@ void WebSocketSessionSSL::Run(const char* inHost, const char* inPort, const char
                            beast::bind_front_handler(&WebSocketSessionSSL::OnResolve, shared_from_this()));
 }
 
+void WebSocketSessionSSL::NotifyClosed() {
+    // Deliberate shutdown, or already reported - either way the owner must
+    // not be asked to reconnect. See the header for why both guards matter.
+    if (stopped || closed_notified_) {
+        return;
+    }
+    closed_notified_ = true;
+    if (on_closed_) {
+        on_closed_();
+    }
+}
+
 void WebSocketSessionSSL::OnResolve(beast::error_code ec, tcp::resolver::results_type results) {
     if (ec) {
-        return fail(ec, "resolve");
+        fail(ec, "resolve");
+        return NotifyClosed();
     } else if (stopped) {
         return;
     }
@@ -40,7 +53,8 @@ void WebSocketSessionSSL::OnResolve(beast::error_code ec, tcp::resolver::results
 
 void WebSocketSessionSSL::OnConnect(beast::error_code ec, tcp::resolver::results_type::endpoint_type ep) {
     if (ec) {
-        return fail(ec, "connect");
+        fail(ec, "connect");
+        return NotifyClosed();
     } else if (stopped) {
         return;
     }
@@ -50,7 +64,8 @@ void WebSocketSessionSSL::OnConnect(beast::error_code ec, tcp::resolver::results
     // Set SNI hostname
     if (!SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str())) {
         ec = beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category());
-        return fail(ec, "SSL SNI");
+        fail(ec, "SSL SNI");
+        return NotifyClosed();
     }
 
     // Update host with port for handshake
@@ -62,7 +77,8 @@ void WebSocketSessionSSL::OnConnect(beast::error_code ec, tcp::resolver::results
 
 void WebSocketSessionSSL::OnSslHandshake(beast::error_code ec) {
     if (ec) {
-        return fail(ec, "ssl_handshake");
+        fail(ec, "ssl_handshake");
+        return NotifyClosed();
     } else if (stopped) {
         return;
     }
@@ -79,7 +95,8 @@ void WebSocketSessionSSL::OnSslHandshake(beast::error_code ec) {
 
 void WebSocketSessionSSL::OnHandshake(beast::error_code ec) {
     if (ec) {
-        return fail(ec, "handshake");
+        fail(ec, "handshake");
+        return NotifyClosed();
     } else if (stopped) {
         return;
     }
@@ -96,7 +113,8 @@ void WebSocketSessionSSL::OnHandshake(beast::error_code ec) {
 
 void WebSocketSessionSSL::OnSubscribeWrite(beast::error_code ec, std::size_t bytes_transferred) {
     if (ec) {
-        return fail(ec, "subscribe_write");
+        fail(ec, "subscribe_write");
+        return NotifyClosed();
     } else if (stopped) {
         return;
     }
@@ -108,10 +126,11 @@ void WebSocketSessionSSL::OnSubscribeWrite(beast::error_code ec, std::size_t byt
 
 void WebSocketSessionSSL::OnRead(beast::error_code ec, std::size_t bytes_transferred) {
     if (ec == websocket::error::closed) {
-        std::cout << "[WebSocket] Connection closed\n";
-        return;
+        Logger::Log(LogLevel::kInfo, "[WebSocket] Connection closed by {}{}", host, target);
+        return NotifyClosed();
     } else if (ec) {
-        return fail(ec, "read");
+        fail(ec, "read");
+        return NotifyClosed();
     } else if (stopped) {
         return;
     }
@@ -134,5 +153,5 @@ void WebSocketSessionSSL::Stop() {
 
 void WebSocketSessionSSL::OnClose(beast::error_code ec) {
     if (ec) return fail(ec, "close");
-    std::cout << "[WebSocket] Closed successfully\n";
+    Logger::Log(LogLevel::kInfo, "[WebSocket] Closed successfully: {}{}", host, target);
 }

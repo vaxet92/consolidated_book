@@ -47,6 +47,33 @@ constexpr uint32_t SelectDepthTier(const std::array<uint32_t, N>& tiers, uint32_
     return tiers.back();  // deepest available - request exceeds what this venue publishes
 }
 
+// ---------------------------------------------------------------------------
+// REMINDER: venue connection limits are NOT verified.
+//
+// Redundant connections multiply socket count: connections x venues x 2
+// streams (depth + fast-BBO). At the default that is 1 x 3 x 2 = 6 sockets;
+// at --connections=3 it is 18, all from one IP.
+//
+// Every venue caps connections per IP, and OKX additionally rate-limits
+// connection ATTEMPTS - which the reconnect loop hits, not just startup.
+// Those limits have not been checked against the documentation.
+//
+// KEY: exceeding a venue's limit does not degrade gracefully. The venue
+// refuses or bans the IP, which takes down every connection to it at once -
+// the exact failure the redundancy was added to prevent.
+// ---------------------------------------------------------------------------
+
+// Default 1: redundancy is OPT-IN. The default configuration behaves exactly
+// as it did before this feature existed - one connection per stream, no dedup
+// work, no risk of hitting an unverified venue limit. An operator who wants
+// failover asks for it explicitly with --connections=N.
+inline constexpr uint32_t kDefaultConnections = 1;
+
+// Upper bound on --connections. This is OUR arbitrary safety limit, not a
+// number from any venue's documentation. It exists so a typo like
+// --connections=300 cannot open 1800 sockets and get the IP banned.
+inline constexpr uint32_t kMaxConnections = 8;
+
 struct ServerConfig {
     std::vector<std::string> venues;       // binance, bybit, okx
     std::vector<std::string> instruments;  // BTCUSDT, ETHUSDT, SOLUSDT
@@ -56,6 +83,22 @@ struct ServerConfig {
     // above, falling back to its deepest tier when the request exceeds what
     // it publishes (see the reminder above).
     uint32_t depth = 500;
+
+    // Redundant WebSocket connections per stream, per venue - "line
+    // arbitration". Every connection carries the same messages; the first
+    // copy to arrive wins and the rest are dropped by the dedup filter.
+    //
+    // The benefit is FAILOVER: one socket dying leaves connections-1 still
+    // delivering, so there is no gap, no resync and no REST refetch.
+    //
+    // A latency benefit is NOT claimed. Real line arbitration wins because
+    // the feeds travel independent physical paths; these share one NIC and
+    // one route, so any gain is jitter, and it is not measured.
+    //
+    // Cost is linear: N sockets, N x bandwidth, N x TLS decrypt per stream.
+    // Duplicates are dropped before parsing where possible, so the parse
+    // cost does not scale with N.
+    uint32_t connections = kDefaultConnections;
 
     // Parse from command line arguments
     static ServerConfig ParseFromArgs(int argc, char* argv[]);

@@ -24,6 +24,8 @@ ServerConfig ServerConfig::ParseFromArgs(int argc, char* argv[]) {
             config.grpc_port = std::stoi(arg.substr(12));
         } else if (arg.find("--depth=") == 0) {
             config.depth = static_cast<uint32_t>(std::stoul(arg.substr(8)));
+        } else if (arg.find("--connections=") == 0) {
+            config.connections = static_cast<uint32_t>(std::stoul(arg.substr(14)));
         } else {
             std::cerr << "Unknown argument: " << arg << "\n";
         }
@@ -57,6 +59,18 @@ bool ServerConfig::Validate() const {
     }
     if (depth == 0) {
         std::cerr << "Error: --depth must be greater than zero\n";
+        return false;
+    }
+    // Rejected, not clamped. Unlike depth - where the venue's fixed tiers
+    // leave no choice but to round - this cap is OURS, so silently changing
+    // the operator's number would hide a typo rather than report it.
+    if (connections == 0) {
+        std::cerr << "Error: --connections must be at least 1\n";
+        return false;
+    }
+    if (connections > kMaxConnections) {
+        std::cerr << "Error: --connections must not exceed " << kMaxConnections
+                  << " (venue connection limits are unverified)\n";
         return false;
     }
     return true;

@@ -25,8 +25,15 @@ inline constexpr std::array<VenueId, kVenueCount> VenueIdArray{
     VenueId::OKX,
 };
 
+// PORTS: 443 everywhere, not the 9443 (Binance) and 8443 (OKX) their docs
+// lead with. All three venues serve the same streams on standard HTTPS, and
+// many networks permit only 443 outbound - office, hotel and some ISPs.
+//
+// KEY: a blocked port presents as a TCP connect timeout, which is
+// indistinguishable in the logs from the venue being down. Verified here with
+// `nc -vz <host> 443` against all three.
 inline constexpr std::string_view kBinanceHost = "stream.binance.com";
-inline constexpr std::string_view kBinancePort = "9443";
+inline constexpr std::string_view kBinancePort = "443";
 // Binance's REST API is a different host/port from its WS stream. Only
 // Binance needs REST at all - its depth stream is differential-only, so the
 // book must be seeded from GET /api/v3/depth (DESIGN_1 §4.3). Bybit and OKX
@@ -39,7 +46,11 @@ inline constexpr std::string_view kBybitPort = "443";
 static constexpr std::string_view kByBitPath = "/v5/public/spot";
 
 inline constexpr std::string_view kOkxHost = "ws.okx.com";
-inline constexpr std::string_view kOkxPort = "8443";
+// 443 rather than the documented 8443. TCP connect succeeds (ws.okx.com is
+// behind Cloudflare), but that alone does not prove OKX routes /ws/v5/public
+// there - if this ever fails it will fail at the HANDSHAKE, not at connect,
+// and reverting to 8443 is the fix.
+inline constexpr std::string_view kOkxPort = "443";
 static constexpr std::string_view kOkxPath = "/ws/v5/public";
 
 class VenueConverter {
