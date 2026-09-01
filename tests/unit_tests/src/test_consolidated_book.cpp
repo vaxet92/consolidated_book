@@ -8,11 +8,7 @@ using namespace market_data::consolidated;
 namespace {
 
 void SetBook(VenueBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
-    BookUpdate update{};
-    update.venue = venue;
-    update.instrument = InstrumentId::BTCUSDT;
-    update.seq = 1;
-    update.is_snapshot = true;
+    BookUpdate update{venue, InstrumentId::BTCUSDT, bids.size(), true, 1};
     update.bids = std::move(bids);
     update.asks = std::move(asks);
 
@@ -52,8 +48,8 @@ TEST(ConsolidatedBookTest, SingleVenueIsCopiedWithPrefixSums) {
     EXPECT_EQ(merged.bids[0].cum_qty, 5u);
     EXPECT_EQ(CumNotional(merged.bids[0]), 100u * 5u);
     EXPECT_EQ(merged.bids[1].price, 99u);
-    EXPECT_EQ(merged.bids[1].cum_qty, 8u);                     // 5 + 3
-    EXPECT_EQ(CumNotional(merged.bids[1]), 500u + 99u * 3u);   // 500 + 297
+    EXPECT_EQ(merged.bids[1].cum_qty, 8u);                    // 5 + 3
+    EXPECT_EQ(CumNotional(merged.bids[1]), 500u + 99u * 3u);  // 500 + 297
 
     ASSERT_EQ(merged.asks.size(), 1u);
     EXPECT_EQ(merged.asks[0].price, 101u);
@@ -130,8 +126,7 @@ TEST(ConsolidatedBookTest, PartiallyOverlappingPricesMergeCorrectly) {
 
 TEST(ConsolidatedBookTest, MaxDepthTruncatesBothSides) {
     VenueBookArray books{};
-    SetBook(books, VenueId::BINANCE, {{100, 1}, {99, 1}, {98, 1}, {97, 1}},
-            {{101, 1}, {102, 1}, {103, 1}, {104, 1}});
+    SetBook(books, VenueId::BINANCE, {{100, 1}, {99, 1}, {98, 1}, {97, 1}}, {{101, 1}, {102, 1}, {103, 1}, {104, 1}});
     Book merged;
 
     MergeBooks(books, merged, /*max_depth=*/2);

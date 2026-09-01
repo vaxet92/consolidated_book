@@ -28,7 +28,7 @@ std::string UpperSymbol(InstrumentId instrument) {
 }  // namespace
 
 BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
-    : Provider(config, std::move(callback), std::move(quote_callback)) {
+    : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {
     std::string symbol = ToLowerSymbol(config.instrument);
     depth_path_ = fmt::format("/ws/{}@depth@100ms", symbol);
     bbo_path_ = fmt::format("/ws/{}@bookTicker", symbol);
@@ -52,8 +52,7 @@ void BinanceProvider::FetchSnapshotAsync() {
     // Depth is a REST query parameter on Binance - already resolved to a
     // valid limit (5/10/20/50/100/500/1000/5000) by SelectDepthTier. An
     // arbitrary value here would be rejected by the API.
-    std::string target =
-        fmt::format("/api/v3/depth?symbol={}&limit={}", UpperSymbol(config.instrument), config.depth);
+    std::string target = fmt::format("/api/v3/depth?symbol={}&limit={}", UpperSymbol(config.instrument), config.depth);
     std::string host(kBinanceRestHost);
     std::string port(kBinanceRestPort);
     VenueId venue = config.venue_id;
@@ -63,7 +62,14 @@ void BinanceProvider::FetchSnapshotAsync() {
     // thread would stall the read loop that is currently buffering events.
     std::thread([this, host, port, target, venue, instrument]() {
         auto body = HttpsGet(host, port, target);
-        auto snapshot = body ? ParseBinanceDepthSnapshot(*body, venue, instrument) : std::nullopt;
+        // Own parser: this lambda runs on a detached thread, so it must not
+        // touch the io_context thread's parser_. A fresh one per snapshot is
+        // fine - a snapshot happens about once per (re)sync.
+        std::optional<BookUpdate> snapshot;
+        if (body) {
+            BinanceParser snapshot_parser(config.depth);  // config is immutable after construction
+            snapshot = snapshot_parser.ParseDepthSnapshot(*body, venue, instrument);
+        }
 
         // Back onto the io_context thread - everything below touches state
         // shared with the message handlers.
@@ -104,7 +110,7 @@ bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
         return false;
     }
 
-    snapshot.recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    snapshot.recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
     Emit(snapshot);
     last_depth_u_ = last_update_id;
 
@@ -120,11 +126,11 @@ bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
 }
 
 void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_index) {
-    auto update = ParseBinanceDepthMessage(message, config.venue_id, config.instrument);
+    auto update = parser_.ParseDepthMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a depth update (e.g. a control/ack message)
     }
-    update->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    update->recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
 
     // Redundant-connection dedup, BEFORE the sync branch below - not after.
     //
@@ -173,7 +179,7 @@ void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_i
 }
 
 void BinanceProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {
-    auto quote = ParseBinanceBboMessage(message, config.venue_id, config.instrument);
+    auto quote = parser_.ParseBboMessage(message, config.venue_id, config.instrument);
     if (!quote) {
         return;  // not a bookTicker payload (e.g. a subscribe ack)
     }
@@ -185,6 +191,6 @@ void BinanceProvider::OnBboMessage(const std::string& message, uint32_t conn_ind
         return;
     }
 
-    quote->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    quote->recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
     EmitQuote(*quote);
 }

@@ -57,14 +57,15 @@ constexpr const char* kRestartMessage = R"({
 }  // namespace
 
 TEST(BybitParserTest, ParsesSnapshotMessage) {
-    auto update = ParseBybitOrderbookMessage(kSnapshotMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
+    BybitParser parser(/*venue_depth=*/50);
+    auto update = parser.ParseOrderbookMessage(kSnapshotMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_EQ(update->venue, VenueId::BYBIT);
     EXPECT_EQ(update->instrument, InstrumentId::BTCUSDT);
     EXPECT_TRUE(update->is_snapshot);
     EXPECT_EQ(update->seq, 177400507u);
-    EXPECT_EQ(update->exch_ts_ns, 1672304484978LL * 1'000'000);
+    EXPECT_EQ(update->exch_ts_ns, 1672304484978LL * kTsNsMultiplier);
 
     ASSERT_EQ(update->bids.size(), 2u);
     EXPECT_EQ(update->bids[0].price, 1649350000000ull);  // 16493.50 * 1e8
@@ -75,7 +76,8 @@ TEST(BybitParserTest, ParsesSnapshotMessage) {
 }
 
 TEST(BybitParserTest, ParsesDeltaMessageAsNonSnapshot) {
-    auto update = ParseBybitOrderbookMessage(kDeltaMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
+    BybitParser parser(/*venue_depth=*/50);
+    auto update = parser.ParseOrderbookMessage(kDeltaMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_FALSE(update->is_snapshot);
@@ -91,7 +93,8 @@ TEST(BybitParserTest, ParsesDeltaMessageAsNonSnapshot) {
 // sequencing layer - is what keeps venue quirks out of continuity.h.
 // Missing it would merge a brand-new book into a stale one.
 TEST(BybitParserTest, UpdateIdOneIsNormalisedToSnapshot) {
-    auto update = ParseBybitOrderbookMessage(kRestartMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
+    BybitParser parser(/*venue_depth=*/50);
+    auto update = parser.ParseOrderbookMessage(kRestartMessage, VenueId::BYBIT, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_TRUE(update->is_snapshot) << R"(u == 1 must be treated as a snapshot despite "type":"delta")";
@@ -99,11 +102,13 @@ TEST(BybitParserTest, UpdateIdOneIsNormalisedToSnapshot) {
 }
 
 TEST(BybitParserTest, IgnoresNonOrderbookMessages) {
-    auto update = ParseBybitOrderbookMessage(kSubscribeAck, VenueId::BYBIT, InstrumentId::BTCUSDT);
+    BybitParser parser(/*venue_depth=*/50);
+    auto update = parser.ParseOrderbookMessage(kSubscribeAck, VenueId::BYBIT, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(BybitParserTest, MalformedJsonReturnsNulloptNotACrash) {
-    auto update = ParseBybitOrderbookMessage("{not valid json", VenueId::BYBIT, InstrumentId::BTCUSDT);
+    BybitParser parser(/*venue_depth=*/50);
+    auto update = parser.ParseOrderbookMessage("{not valid json", VenueId::BYBIT, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }

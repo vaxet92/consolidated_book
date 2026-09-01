@@ -1,12 +1,18 @@
 #include "bybit_parser.h"
-#include "decimal.h"
+
 #include <simdjson.h>
+
+#include <vector>
+
+#include "decimal.h"
 
 using namespace simdjson;
 
 namespace market_data {
 
 namespace {
+
+constexpr uint64_t kBybitScale = 8;
 
 void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
     for (auto level : levels) {
@@ -17,23 +23,23 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
         std::string_view qty_sv = (*it).get_string();
 
         PriceLevel level_out;
-        level_out.price = ParseScaledDecimal(price_sv);
-        level_out.qty = ParseScaledDecimal(qty_sv);
+        level_out.price = ParseScaledDecimal<kBybitScale>(price_sv);
+        level_out.qty = ParseScaledDecimal<kBybitScale>(qty_sv);
         out.push_back(level_out);
     }
 }
 
 }  // namespace
 
-std::optional<BookUpdate> ParseBybitOrderbookMessage(const std::string& message, VenueId venue,
-                                                     InstrumentId instrument) {
+BybitParser::BybitParser(uint32_t venue_depth) : Parser(venue_depth) {}
+
+std::optional<BookUpdate> BybitParser::ParseOrderbookMessage(std::string_view message, VenueId venue,
+                                                            InstrumentId instrument) {
     // Contract: never throws. simdjson_error (malformed JSON, unexpected
     // shape) becomes std::nullopt, same as "not an orderbook message" -
     // callers must not need a try/catch of their own.
     try {
-        ondemand::parser parser;
-        padded_string json(message);
-        ondemand::document doc = parser.iterate(json);
+        ondemand::document doc = parser_.iterate(Load(message));
 
         auto topic_result = doc["topic"].get_string();
         if (topic_result.error()) {
@@ -45,17 +51,14 @@ std::optional<BookUpdate> ParseBybitOrderbookMessage(const std::string& message,
 
         // ts is read before data - it comes first in the real message.
         auto ts_result = doc["ts"].get_int64();
-        int64_t exch_ts_ns = ts_result.error() ? 0 : ts_result.value() * 1'000'000;
+        int64_t exch_ts_ns = ts_result.error() ? 0 : ts_result.value() * kTsNsMultiplier;
 
         auto data = doc["data"].get_object();
         if (data.error()) {
             return std::nullopt;
         }
 
-        BookUpdate update{};
-        update.venue = venue;
-        update.instrument = instrument;
-        update.is_snapshot = is_snapshot;
+        BookUpdate update{venue, instrument, reserve_levels_, is_snapshot};
         update.exch_ts_ns = exch_ts_ns;
 
         auto seq_result = data["u"].get_uint64();

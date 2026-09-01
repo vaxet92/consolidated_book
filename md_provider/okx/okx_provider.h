@@ -1,6 +1,7 @@
 #pragma once
 
 #include "md_provider/md_provider.h"
+#include "okx_parser.h"
 #include "types/venue.h"
 #include <string>
 
@@ -29,6 +30,10 @@ class OKXProvider : public Provider {
     // "+1" check like Bybit's would be wrong here. 0 means "no snapshot
     // yet"; only touched on the io_context thread, so no lock.
     uint64_t last_depth_seq_ = 0;
+
+    // Both OnDepthMessage and OnBboMessage run on the one io_context thread,
+    // so they share this parser. OKX has no detached REST-snapshot path.
+    OkxParser parser_;
 };
 
 }  // namespace market_data

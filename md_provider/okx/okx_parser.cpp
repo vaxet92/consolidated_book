@@ -1,10 +1,20 @@
 #include "okx_parser.h"
-#include "decimal.h"
+
 #include <simdjson.h>
+
+#include <vector>
+
+#include "decimal.h"
 
 using namespace simdjson;
 
 namespace market_data {
+
+// Price/qty are decimal strings ("8506.96", "256") - scale 8 like every
+// other venue. `ts` is integer milliseconds - parsed at scale 0, then
+// multiplied to nanoseconds.
+constexpr uint64_t kOkxScale = 8;
+constexpr uint64_t kOkxTsScale = 0;
 
 namespace {
 
@@ -19,25 +29,25 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
         std::string_view qty_sv = (*it).get_string();
 
         PriceLevel level_out;
-        level_out.price = ParseScaledDecimal(price_sv);
-        level_out.qty = ParseScaledDecimal(qty_sv);
+        level_out.price = ParseScaledDecimal<kOkxScale>(price_sv);
+        level_out.qty = ParseScaledDecimal<kOkxScale>(qty_sv);
         out.push_back(level_out);
     }
 }
 
 }  // namespace
 
-std::optional<BookUpdate> ParseOkxBooksMessage(const std::string& message, VenueId venue, InstrumentId instrument) {
+OkxParser::OkxParser(uint32_t venue_depth) : Parser(venue_depth) {}
+
+std::optional<BookUpdate> OkxParser::ParseBooksMessage(std::string_view message, VenueId venue, InstrumentId instrument) {
     try {
-        ondemand::parser parser;
-        padded_string json(message);
-        ondemand::document doc = parser.iterate(json);
+        ondemand::document doc = parser_.iterate(Load(message));
 
         // Hard gate, deliberately: returning on the first error means a
         // malformed document is never touched again. simdjson's on-demand
         // iterate() is lazy, so THIS is where bad JSON is actually detected -
         // continuing past it leaves the iterator at a broken depth and the
-        // next lookup asserts. bbo-tbt (no `action`) has its own parser.
+        // next lookup asserts. bbo-tbt (no `action`) has its own method.
         auto action_result = doc["action"].get_string();
         if (action_result.error()) {
             return std::nullopt;  // not a books update (e.g. subscribe ack, pong, malformed)
@@ -51,10 +61,7 @@ std::optional<BookUpdate> ParseOkxBooksMessage(const std::string& message, Venue
 
         // Exactly one entry expected per instId subscribed.
         for (auto entry : data_array.value()) {
-            BookUpdate update{};
-            update.venue = venue;
-            update.instrument = instrument;
-            update.is_snapshot = is_snapshot;
+            BookUpdate update{venue, instrument, reserve_levels_, is_snapshot};
 
             // Read in real document order: asks, bids, ts, checksum
             // (skipped), prevSeqId, seqId. prevSeqId MUST be read before
@@ -69,7 +76,8 @@ std::optional<BookUpdate> ParseOkxBooksMessage(const std::string& message, Venue
             }
 
             auto ts_result = entry["ts"].get_string();  // OKX sends ts as a string
-            update.exch_ts_ns = ts_result.error() ? 0 : ParseScaledDecimal(ts_result.value(), 0) * 1'000'000;
+            update.exch_ts_ns =
+                ts_result.error() ? 0 : ParseScaledDecimal<kOkxTsScale>(ts_result.value()) * kTsNsMultiplier;
 
             // -1 on a snapshot; on an update it is the seqId this message
             // follows, which is what the continuity chain is checked against.
@@ -89,11 +97,9 @@ std::optional<BookUpdate> ParseOkxBooksMessage(const std::string& message, Venue
     }
 }
 
-std::optional<BookUpdate> ParseOkxBboMessage(const std::string& message, VenueId venue, InstrumentId instrument) {
+std::optional<BookUpdate> OkxParser::ParseBboMessage(std::string_view message, VenueId venue, InstrumentId instrument) {
     try {
-        ondemand::parser parser;
-        padded_string json(message);
-        ondemand::document doc = parser.iterate(json);
+        ondemand::document doc = parser_.iterate(Load(message));
 
         // `data` is the gate here - always present on bbo-tbt, absent on
         // subscribe acks/pongs, and the first thing to fail on malformed
@@ -106,12 +112,7 @@ std::optional<BookUpdate> ParseOkxBboMessage(const std::string& message, VenueId
 
         // Exactly one entry expected per instId subscribed.
         for (auto entry : data_array.value()) {
-            BookUpdate update{};
-            update.venue = venue;
-            update.instrument = instrument;
-            // bbo-tbt is a full top-of-book replacement every message, so it
-            // is always a snapshot - there are no incremental deltas.
-            update.is_snapshot = true;
+            BookUpdate update{venue, instrument, reserve_levels_, true};
 
             // Read in wire order: asks, bids, ts, seqId (no checksum here,
             // unlike the books channel).
@@ -125,7 +126,8 @@ std::optional<BookUpdate> ParseOkxBboMessage(const std::string& message, VenueId
             }
 
             auto ts_result = entry["ts"].get_string();  // OKX sends ts as a string
-            update.exch_ts_ns = ts_result.error() ? 0 : ParseScaledDecimal(ts_result.value(), 0) * 1'000'000;
+            update.exch_ts_ns =
+                ts_result.error() ? 0 : ParseScaledDecimal<kOkxTsScale>(ts_result.value()) * kTsNsMultiplier;
 
             auto seq_result = entry["seqId"].get_int64();
             update.seq = seq_result.error() ? 0 : static_cast<uint64_t>(seq_result.value());

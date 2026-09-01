@@ -1,6 +1,10 @@
 #include "binance_parser.h"
-#include "decimal.h"
+
 #include <simdjson.h>
+
+#include <vector>
+
+#include "decimal.h"
 
 using namespace simdjson;
 
@@ -17,32 +21,30 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
         std::string_view qty_sv = (*it).get_string();
 
         PriceLevel level_out;
-        level_out.price = ParseScaledDecimal(price_sv);
-        level_out.qty = ParseScaledDecimal(qty_sv);
+        level_out.price = ParseScaledDecimal<kBinanceScale>(price_sv);
+        level_out.qty = ParseScaledDecimal<kBinanceScale>(qty_sv);
         out.push_back(level_out);
     }
 }
 
 }  // namespace
 
-std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, VenueId venue, InstrumentId instrument) {
+BinanceParser::BinanceParser(uint32_t venue_depth) : Parser(venue_depth) {}
+
+std::optional<BookUpdate> BinanceParser::ParseDepthMessage(std::string_view message, VenueId venue,
+                                                           InstrumentId instrument) {
     try {
-        ondemand::parser parser;
-        padded_string json(message);
-        ondemand::document doc = parser.iterate(json);
+        ondemand::document doc = parser_.iterate(Load(message));
 
         auto event_type_result = doc["e"].get_string();
         if (event_type_result.error() || event_type_result.value() != "depthUpdate") {
             return std::nullopt;  // not a depth update (e.g. a control/ack message)
         }
 
-        BookUpdate update{};
-        update.venue = venue;
-        update.instrument = instrument;
-        update.is_snapshot = false;
+        BookUpdate update(venue, instrument, reserve_levels_);
 
         auto event_ts_result = doc["E"].get_int64();
-        update.exch_ts_ns = event_ts_result.error() ? 0 : event_ts_result.value() * 1'000'000;
+        update.exch_ts_ns = event_ts_result.error() ? 0 : event_ts_result.value() * kTsNsMultiplier;
 
         // Wire order is e, E, s, U, u, b, a - so U must be read before u to
         // stay forward-only.
@@ -68,11 +70,10 @@ std::optional<BookUpdate> ParseBinanceDepthMessage(const std::string& message, V
     }
 }
 
-std::optional<BookUpdate> ParseBinanceDepthSnapshot(const std::string& body, VenueId venue, InstrumentId instrument) {
+std::optional<BookUpdate> BinanceParser::ParseDepthSnapshot(std::string_view body, VenueId venue,
+                                                            InstrumentId instrument) {
     try {
-        ondemand::parser parser;
-        padded_string json(body);
-        ondemand::document doc = parser.iterate(json);
+        ondemand::document doc = parser_.iterate(Load(body));
 
         // Wire order is lastUpdateId, bids, asks. lastUpdateId is also the
         // gate: an error response ({"code":..,"msg":..}) has no such field.
@@ -81,14 +82,9 @@ std::optional<BookUpdate> ParseBinanceDepthSnapshot(const std::string& body, Ven
             return std::nullopt;
         }
 
-        BookUpdate update{};
-        update.venue = venue;
-        update.instrument = instrument;
-        update.is_snapshot = true;
-        update.seq = last_update_id_result.value();
+        // The ctor reserves bids/asks and sets is_snapshot + seq.
         // A REST snapshot has no predecessor and no exchange timestamp.
-        update.prev_seq = 0;
-        update.exch_ts_ns = 0;
+        BookUpdate update{venue, instrument, reserve_levels_, true, last_update_id_result.value()};
 
         auto bids_result = doc["bids"].get_array();
         if (!bids_result.error()) {
@@ -106,11 +102,10 @@ std::optional<BookUpdate> ParseBinanceDepthSnapshot(const std::string& body, Ven
     }
 }
 
-std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message, VenueId venue, InstrumentId instrument) {
+std::optional<BboQuote> BinanceParser::ParseBboMessage(std::string_view message, VenueId venue,
+                                                       InstrumentId instrument) {
     try {
-        ondemand::parser parser;
-        padded_string json(message);
-        ondemand::document doc = parser.iterate(json);
+        ondemand::document doc = parser_.iterate(Load(message));
 
         // Read in wire order (u, s, b, B, a, A) - simdjson on-demand scans
         // forward, so matching the document's own order is cheapest.
@@ -133,10 +128,10 @@ std::optional<BboQuote> ParseBinanceBboMessage(const std::string& message, Venue
         quote.instrument = instrument;
         quote.seq = update_id_result.value();
         // bookTicker carries no exchange timestamp - exch_ts_ns stays 0.
-        quote.bid_price = ParseScaledDecimal(bid_price_result.value());
-        quote.bid_qty = ParseScaledDecimal(bid_qty_result.value());
-        quote.ask_price = ParseScaledDecimal(ask_price_result.value());
-        quote.ask_qty = ParseScaledDecimal(ask_qty_result.value());
+        quote.bid_price = ParseScaledDecimal<kBinanceScale>(bid_price_result.value());
+        quote.bid_qty = ParseScaledDecimal<kBinanceScale>(bid_qty_result.value());
+        quote.ask_price = ParseScaledDecimal<kBinanceScale>(ask_price_result.value());
+        quote.ask_qty = ParseScaledDecimal<kBinanceScale>(ask_qty_result.value());
         return quote;
 
     } catch (const simdjson_error&) {

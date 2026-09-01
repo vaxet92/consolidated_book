@@ -54,14 +54,15 @@ constexpr const char* kBboMessage = R"({
 }  // namespace
 
 TEST(OkxParserTest, ParsesSnapshotMessage) {
-    auto update = ParseOkxBooksMessage(kSnapshotMessage, VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBooksMessage(kSnapshotMessage, VenueId::OKX, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_EQ(update->venue, VenueId::OKX);
     EXPECT_EQ(update->instrument, InstrumentId::BTCUSDT);
     EXPECT_TRUE(update->is_snapshot);
     EXPECT_EQ(update->seq, 123456u);
-    EXPECT_EQ(update->exch_ts_ns, 1597026383085LL * 1'000'000);
+    EXPECT_EQ(update->exch_ts_ns, 1597026383085LL * kTsNsMultiplier);
 
     // 4-element levels [price, qty, deprecated, numOrders] - only first two matter.
     ASSERT_EQ(update->asks.size(), 1u);
@@ -74,7 +75,8 @@ TEST(OkxParserTest, ParsesSnapshotMessage) {
 }
 
 TEST(OkxParserTest, ParsesUpdateMessageAsNonSnapshot) {
-    auto update = ParseOkxBooksMessage(kUpdateMessage, VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBooksMessage(kUpdateMessage, VenueId::OKX, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_FALSE(update->is_snapshot);
@@ -84,23 +86,26 @@ TEST(OkxParserTest, ParsesUpdateMessageAsNonSnapshot) {
 }
 
 TEST(OkxParserTest, IgnoresNonBooksMessages) {
-    auto update = ParseOkxBooksMessage(kSubscribeAck, VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBooksMessage(kSubscribeAck, VenueId::OKX, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(OkxParserTest, MalformedJsonReturnsNulloptNotACrash) {
-    auto update = ParseOkxBooksMessage("{not valid json", VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBooksMessage("{not valid json", VenueId::OKX, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(OkxParserTest, ParsesBboTbtMessage) {
-    auto update = ParseOkxBboMessage(kBboMessage, VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBboMessage(kBboMessage, VenueId::OKX, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_EQ(update->venue, VenueId::OKX);
     EXPECT_TRUE(update->is_snapshot);  // bbo-tbt is always a full replacement
     EXPECT_EQ(update->seq, 363996337u);
-    EXPECT_EQ(update->exch_ts_ns, 1597026383085LL * 1'000'000);
+    EXPECT_EQ(update->exch_ts_ns, 1597026383085LL * kTsNsMultiplier);
 
     ASSERT_EQ(update->asks.size(), 1u);
     EXPECT_EQ(update->asks[0].price, 850696000000ull);  // 8506.96 * 1e8
@@ -109,7 +114,8 @@ TEST(OkxParserTest, ParsesBboTbtMessage) {
 }
 
 TEST(OkxParserTest, BboIgnoresSubscribeAck) {
-    auto update = ParseOkxBboMessage(kSubscribeAck, VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBboMessage(kSubscribeAck, VenueId::OKX, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }
 
@@ -117,6 +123,7 @@ TEST(OkxParserTest, BboIgnoresSubscribeAck) {
 // an absent `action` field left simdjson's lazy iterator at a broken depth,
 // and the next lookup asserted instead of returning an error.
 TEST(OkxParserTest, BboMalformedJsonReturnsNulloptNotACrash) {
-    auto update = ParseOkxBboMessage("{not valid json", VenueId::OKX, InstrumentId::BTCUSDT);
+    OkxParser parser(/*venue_depth=*/400);
+    auto update = parser.ParseBboMessage("{not valid json", VenueId::OKX, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }

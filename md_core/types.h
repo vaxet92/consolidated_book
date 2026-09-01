@@ -19,6 +19,8 @@ using Notional = unsigned __int128;  // ticks * units - needs the extra width. N
 inline constexpr uint32_t kScaleExponent = 8;
 inline constexpr uint64_t kScaleFactor = 100'000'000;
 
+inline constexpr int64_t kTsNsMultiplier = 1'000'000LL;  // ms -> ns
+
 // Any place that needs a *signed* difference between two PriceTicks/QtyUnits
 // (e.g. a crossed book: bid - ask) must compute it explicitly as
 // (bool sign, PriceTicks magnitude) - compare first, then subtract the
@@ -27,18 +29,27 @@ inline constexpr uint64_t kScaleFactor = 100'000'000;
 
 struct PriceLevel {
     PriceTicks price;
-    QtyUnits qty;  // absolute qty AT this price; qty == 0 means "remove this level"
+    QtyUnits qty;  // absolute qty AT this price; qty ={} means "remove this level"
 };
 
 struct BookUpdate {
-    VenueId venue;
-    InstrumentId instrument;
-    uint64_t seq;  // venue-native monotonic sequence number
+    BookUpdate() = default;
+
+    explicit BookUpdate(const VenueId venue, const InstrumentId instrument, const size_t reserve_levels,
+                        bool is_snapshot = false, uint64_t seq = 0)
+        : venue(venue), instrument(instrument), seq(seq), is_snapshot(is_snapshot) {
+        bids.reserve(reserve_levels);
+        asks.reserve(reserve_levels);
+    }
+
+    VenueId venue{};
+    InstrumentId instrument{};
+    uint64_t seq{};  // venue-native monotonic sequence number
     // Venue-specific continuity field: the sequence this update claims to
     // follow. OKX `prevSeqId` (-1 on a snapshot), Binance `U` (first update
     // id in the event). 0 when the venue has no such field - Bybit chains
     // by u+1 instead. Signed because OKX uses -1.
-    int64_t prev_seq = 0;
+    int64_t prev_seq{};
     // TWO receive stamps, deliberately. They answer different questions and
     // need different clocks.
     //
@@ -58,10 +69,10 @@ struct BookUpdate {
     // staleness PLUS an unknown clock offset PLUS network delay - three
     // unknowns, one equation. Fit for drift estimation only, never for
     // admission to the merge.
-    int64_t recv_ts_ns;         // ours, wall clock. Signed: used in drift subtraction.
-    int64_t exch_ts_ns;         // venue's own timestamp - drift estimation only, never compared across venues.
-    int64_t recv_mono_ns = 0;   // ours, monotonic. Staleness only.
-    bool is_snapshot;           // true = full replace, false = incremental delta
+    int64_t recv_ts_ns{};    // ours, wall clock. Signed: used in drift subtraction.
+    int64_t exch_ts_ns{};    // venue's own timestamp - drift estimation only, never compared across venues.
+    int64_t recv_mono_ns{};  // ours, monotonic. Staleness only.
+    bool is_snapshot{};      // true = full replace, false = incremental delta
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
 };
@@ -73,22 +84,22 @@ struct BookUpdate {
 struct BboQuote {
     VenueId venue;
     InstrumentId instrument;
-    uint64_t seq = 0;          // venue-native: Binance `u`, Bybit `seq`, OKX `seqId`
+    uint64_t seq{};  // venue-native: Binance `u`, Bybit `seq`, OKX `seqId`
     // Same two-clock split as BookUpdate above, and for the same reasons.
     // The depth and fast-BBO streams are separate sockets, so their
     // staleness is tracked independently - one can die while the other
     // keeps streaming.
-    int64_t recv_ts_ns = 0;    // ours, wall clock. Stamped by the provider.
-    int64_t exch_ts_ns = 0;    // venue's, where available (Binance bookTicker has none)
-    int64_t recv_mono_ns = 0;  // ours, monotonic. Staleness only.
-    PriceTicks bid_price = 0;
-    QtyUnits bid_qty = 0;
-    PriceTicks ask_price = 0;
-    QtyUnits ask_qty = 0;
+    int64_t recv_ts_ns{};    // ours, wall clock. Stamped by the provider.
+    int64_t exch_ts_ns{};    // venue's, where available (Binance bookTicker has none)
+    int64_t recv_mono_ns{};  // ours, monotonic. Staleness only.
+    PriceTicks bid_price{};
+    QtyUnits bid_qty{};
+    PriceTicks ask_price{};
+    QtyUnits ask_qty{};
 };
 
 // One latest fast-BBO quote per venue, indexed by VenueId. A quote with
-// price == 0 means that venue hasn't sent one yet. Raw per-venue input to
+// price = 0 means that venue hasn't sent one yet. Raw per-venue input to
 // consolidation, not consolidated output - which is why it lives here at
 // market_data scope, mirroring VenueBookArray, rather than in the
 // `consolidated` namespace.

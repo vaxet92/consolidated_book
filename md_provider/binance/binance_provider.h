@@ -1,6 +1,7 @@
 #pragma once
 
 #include "md_provider/md_provider.h"
+#include "binance_parser.h"
 #include <string>
 #include <vector>
 
@@ -60,6 +61,11 @@ class BinanceProvider : public Provider {
 
     // All of these are only touched on the io_context thread (the snapshot
     // result is marshalled back there via net::post), so no locking.
+    //
+    // parser_ included: OnDepthMessage and OnBboMessage both run on that one
+    // thread, so they share it. The REST snapshot runs on a detached thread
+    // and uses its own local BinanceParser instead.
+    BinanceParser parser_;
     SyncState sync_state_ = SyncState::kSyncing;
     bool snapshot_requested_ = false;
     int snapshot_attempts_ = 0;

@@ -128,6 +128,8 @@ class MDProvider {
 
 The sink is called on the provider's own thread. Providers never allocate per update after warm-up: parse buffers, delta vectors, and read buffers are reused.
 
+Parsing is factored into a `Parser` base class that owns a reused `simdjson::ondemand::parser` and a growable input buffer; `BinanceParser` / `OkxParser` / `BybitParser` derive from it. One instance per parsing thread — the parser is not thread-safe. A venue's depth and fast-BBO streams run on the same thread and share one parser; Binance's detached REST-snapshot fetch uses its own.
+
 ### 4.2 Sync state machine (identical shape for all venues)
 
 ```
@@ -299,7 +301,7 @@ This must be documented as intentional: **this is a state-publishing API, not an
 
 ### 7.5 Allocation discipline
 
-Hot paths allocate nothing after warm-up: reused parse buffers, pre-sized delta vectors, pre-sized merge scratch, snapshot objects recycled through a free list. Protobuf message reuse via `Arena` on the publish path. An allocation counter in debug builds asserts this in tests.
+Hot paths allocate nothing after warm-up: a reused simdjson parser and input buffer in the `Parser` base class, `BookUpdate` level vectors reserved to the venue depth tier at construction, pre-sized merge scratch, snapshot objects recycled through a free list. Protobuf message reuse via `Arena` on the publish path. An allocation counter in debug builds asserts this in tests.
 
 ---
 
@@ -400,9 +402,9 @@ Test coverage is an explicit assessment criterion, and `md_core`'s I/O-free desi
 | Staleness | Synthetic replay with injected per-venue delays; assert admission/exclusion and hysteresis behave as specified |
 | Concurrency | Seqlock under TSan: writer + readers, assert no torn reads and bounded retry |
 | Integration | Aggregator + 3 replay providers + 3 clients in-process; assert client stdout matches expected golden output |
-| Benchmark | Book apply throughput, merge+derive per tick, parse throughput, end-to-end tick→client latency |
+| Benchmark | Binance JSON parser latency (`benchmarks/bench_binance_parser.cpp`, `-DBUILD_BENCHMARKS=ON`) — **built**. Book apply throughput, merge+derive per tick, end-to-end tick→client latency — planned, not built. |
 
-Sanitizer builds (ASan/UBSan/TSan) in CI. The benchmark suite exists so the optimization claims in the README have numbers behind them — an optimization section without before/after measurements reads as guesswork.
+Sanitizer builds (ASan/UBSan/TSan) in CI. The one benchmark that exists (parser latency) backs the parser-reuse numbers in the README; every other optimization claim is still an estimate.
 
 ---
 
@@ -422,7 +424,7 @@ Bottlenecks, in the order they are expected to matter, each with its mitigation 
 
 | # | Bottleneck | Mitigation | Measured by |
 |---|---|---|---|
-| 1 | JSON parsing | simdjson, parse directly into deltas, no DOM, no per-field `std::string` | parse throughput bench |
+| 1 | JSON parsing | simdjson, parse directly into deltas, no DOM, no per-field `std::string` | parse latency bench (Binance, built) |
 | 2 | Allocation/copying in hot path | reused buffers, pre-sized vectors, snapshot free list, protobuf arenas | debug allocation counter + bench |
 | 3 | Slow-client head-of-line blocking | per-session depth-1 conflation, overwrite-pending | integration test with an artificially slow client |
 | 4 | Lock contention on books | single owner thread; no lock at all on the book path | consolidator CPU% (the trigger for the seqlock design) |
@@ -430,6 +432,8 @@ Bottlenecks, in the order they are expected to matter, each with its mitigation 
 | 6 | Cache misses in book traversal | flat contiguous structures; ladder documented as next step | book apply bench vs. `std::map` baseline |
 | 7 | Wakeup/syscall churn | timerfd tick, batched reads, one io_context per thread | perf stat context-switch count |
 | 8 | Resync storms | backoff with jitter + hysteresis | staleness test suite |
+
+Row 1 has a first result: constructing simdjson's parser and the `BookUpdate` level vectors per message costs ~2–3× versus reusing them (Binance parser latency bench). Rows 2–8 remain estimates.
 
 Not pursued in v1, documented as future work with rationale: tick-indexed ladder with hierarchical bitmap, lock-free SPSC rings between receive and parse, CPU pinning and NUMA placement, kernel bypass.
 

@@ -24,7 +24,7 @@ std::string ToOkxInstId(InstrumentId instrument) {
 }  // namespace
 
 OKXProvider::OKXProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
-    : Provider(config, std::move(callback), std::move(quote_callback)) {}
+    : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {}
 
 std::string OKXProvider::DepthSubscriptionMessage() const {
     return fmt::format(R"({{"op":"subscribe","args":[{{"channel":"books","instId":"{}"}}]}})",
@@ -37,7 +37,7 @@ std::string OKXProvider::BboSubscriptionMessage() const {
 }
 
 void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index) {
-    auto update = ParseOkxBooksMessage(message, config.venue_id, config.instrument);
+    auto update = parser_.ParseBooksMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a books update (e.g. subscribe ack, pong)
     }
@@ -57,8 +57,7 @@ void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index
     // prev_seq > 0, not >= 0: -1 is the snapshot marker and 0 is what the
     // parser writes when the field is missing. Treating a parse failure as a
     // reset would be worse than treating it as a normal message.
-    const bool venue_reset =
-        (update->prev_seq > 0 && update->seq < static_cast<uint64_t>(update->prev_seq));
+    const bool venue_reset = (update->prev_seq > 0 && update->seq < static_cast<uint64_t>(update->prev_seq));
 
     if (!AcceptDepth(update->seq, conn_index, venue_reset)) {
         return;
@@ -79,13 +78,13 @@ void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index
             break;
     }
 
-    update->recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    update->recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
 
     Emit(*update);
 }
 
 void OKXProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {
-    auto update = ParseOkxBboMessage(message, config.venue_id, config.instrument);
+    auto update = parser_.ParseBboMessage(message, config.venue_id, config.instrument);
     if (!update) {
         return;  // not a bbo-tbt payload (e.g. subscribe ack, pong)
     }
@@ -108,7 +107,7 @@ void OKXProvider::OnBboMessage(const std::string& message, uint32_t conn_index) 
     quote.instrument = config.instrument;
     quote.seq = update->seq;  // OKX seqId
     quote.exch_ts_ns = update->exch_ts_ns;
-    quote.recv_ts_ns = GetCurrentTimeMs() * 1'000'000;
+    quote.recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
     quote.bid_price = update->bids.front().price;
     quote.bid_qty = update->bids.front().qty;
     quote.ask_price = update->asks.front().price;

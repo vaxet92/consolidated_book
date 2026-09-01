@@ -14,7 +14,7 @@ Four services:
 
 The three `*_sub` binaries exist to exercise one feed in isolation while debugging. `client_app` is what actually ships — all four share `client_common` for connection handling, gap detection and formatting.
 
-> **Status: working end-to-end against live exchange data.** All three feeds publish, and the whole system runs under docker-compose. Benchmarks and the staleness policy are not built — see [Known limitations](#known-limitations).
+> **Status: working end-to-end against live exchange data.** All three feeds publish, and the whole system runs under docker-compose. The staleness policy is not built, and the only benchmark is the Binance parser's — see [Known limitations](#known-limitations).
 
 ---
 
@@ -108,7 +108,7 @@ What that costs: the three parser threads contend on one lock, and the merge plu
 
 What it keeps: the book logic itself is still effectively single-threaded and deterministic, since only one thread is ever inside it. The testability argument survives; the lock-free claim does not.
 
-**Condition to revisit:** provider threads blocking measurably on `apply_mutex_`, or the merge cost inside the lock becoming visible in publish latency. Neither is measured today — no benchmark exists, which is itself a gap (see [Known limitations](#known-limitations)).
+**Condition to revisit:** provider threads blocking measurably on `apply_mutex_`, or the merge cost inside the lock becoming visible in publish latency. Neither is measured today — no benchmark covers this path (only the Binance parser has one), which is itself a gap (see [Known limitations](#known-limitations)).
 
 ### Rejected: each exchange thread owns its own book, with a seqlock for the reader
 
@@ -130,7 +130,7 @@ There is also a latency argument. Binance sends `depth@100ms`, which means the e
 
 Against that, a seqlock is easy to write and hard to write *correctly*. A mistake in memory ordering produces a silently wrong order book at a low rate. In a two-week project that is the worst possible failure mode, because you will not find it.
 
-**Condition to revisit:** consolidator CPU above about 50% of one core, which is roughly 50,000 updates per second. Reaching that needs tick-by-tick channels rather than the throttled public ones. The benchmark that would detect it is built; the optimization is not.
+**Condition to revisit:** consolidator CPU above about 50% of one core, which is roughly 50,000 updates per second. Reaching that needs tick-by-tick channels rather than the throttled public ones. The benchmark that would detect it (merge + derive per tick) is not built; only the Binance parser has one.
 
 For completeness, the third option — `shared_mutex` with multiple readers — is the worst of the three. Under contention it becomes a futex syscall, and readers block the writer. That is backwards here: the writer is on the latency path and the reader is a periodic publisher.
 
@@ -143,6 +143,16 @@ Several threads parsing one stream breaks message ordering, which then has to be
 ZeroMQ between components in the same process would serialize a struct, copy it through a socket buffer and deserialize it — for work an in-memory ring buffer does by moving a pointer.
 
 Splitting each exchange adapter into its own process and container *is* a real architecture: one adapter crashing would not affect the others, and each could be restarted alone. The cost is serialization on every update, extra latency, and more failure modes. For a single symbol on three exchanges, one process is the right trade. Noted because the isolation argument is genuine and would win at larger scale.
+
+## Parsing: one stateful parser object per venue thread
+
+Each venue has a parser class (`BinanceParser`, `OkxParser`, `BybitParser`) over a shared `Parser` base that owns a reused `simdjson::ondemand::parser` and a growable input buffer. simdjson's parser is meant to be constructed once and reused; a per-message parser re-allocates its internal buffers every time. Each `BookUpdate` also reserves its bid and ask vectors to the venue's depth tier at construction, so a full snapshot fills them without reallocating.
+
+**One instance per thread.** The parser holds mutable state and is not thread-safe. A venue's depth and fast-BBO streams are handled on that venue's single io_context thread and share one parser. Binance's REST snapshot is parsed on a separate detached thread, so it gets its own local parser.
+
+### Rejected: construct a parser per message
+
+Simpler — no lifetime rule — but it re-allocates simdjson's working buffers and the level vectors on every message. Measured on the Binance parser: **~2–3× slower**. bookTicker went ~370 ns → ~120 ns, a 10-level-per-side depth delta ~1500 ns → ~600 ns (laptop, `-O3`, not pinned; see `benchmarks/bench_binance_parser.cpp`).
 
 ## Consolidation: three books merged fresh, never one shared book
 
@@ -317,7 +327,7 @@ A *genuine* venue reset (OKX maintenance, Bybit `u == 1`) does move the mark bac
 
 # Hot paths not yet optimized
 
-Everything here is a **known cost accepted deliberately**, not an oversight. None of it is measured — there is no benchmark in the project, which is the first thing to fix before optimizing any of it.
+Everything here is a **known cost accepted deliberately**, not an oversight. Only the Binance JSON parser has a latency benchmark (`benchmarks/`, built with `-DBUILD_BENCHMARKS=ON`); none of the paths below are measured yet, which is the first thing to fix before optimizing any of them.
 
 | Path | Cost | Fix, when a number justifies it |
 |---|---|---|
@@ -334,7 +344,7 @@ Everything here is a **known cost accepted deliberately**, not an oversight. Non
 # Known limitations
 
 **Not built:**
-- **Benchmarks.** No before-numbers exist, so every performance statement in this document is an estimate and is labelled as such.
+- **Benchmarks.** Only the Binance JSON parser has one — a latency micro-benchmark (`benchmarks/bench_binance_parser.cpp`, built with `-DBUILD_BENCHMARKS=ON`) with before/after numbers for the parser-reuse work in [Parsing](#parsing-one-stateful-parser-object-per-venue-thread). Every other performance statement in this document is an estimate and is labelled as such.
 - **Staleness policy** (§6): the watchdog, drift detector and admission rule. `VenueStatus` exists on the wire but is never populated — a stale venue still contributes silently.
 - **The fast-BBO oracle** (§4.4): comparing the depth-derived BBO against the venues' own BBO channels to detect a desynced book. This matters more than planned, because OKX **deprecated its CRC32 checksum** (now fixed at 0), removing the only per-message integrity check any venue offered. Gap detection catches *missed* messages, not *misapplied* ones.
 - **Record and replay** — capturing raw exchange frames and feeding them back through the same parsers, giving reproducible full-pipeline runs and an offline compose profile. Dropped deliberately: the components are unit-tested individually, and the time went to redundant connections instead. The cost is that nothing exercises the whole pipeline deterministically, so a bug seen against live data cannot be reproduced.

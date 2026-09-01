@@ -1,24 +1,36 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
-#include <string>
+#include <string_view>
 
 #include "md_core/types.h"
+#include "md_provider/base_parser.h"
 
 namespace market_data {
 
-// Parses one Bybit orderbook.* message (v5 public/spot: {"topic","type",
-// "ts","data":{...},"cts"}). Returns std::nullopt for non-orderbook
-// messages (subscribe acks, pongs).
-//
-// KEY: fields below are read in the SAME order they appear in the real
-// message (topic, type, ts, then inside data: u, b, a). simdjson's
-// on-demand API is a single forward pass - it can never read a field that
-// comes before one already consumed. Reordering these reads without
-// checking the real wire format will crash (assertion in simdjson, not a
-// normal error), not just misparse. test_bybit_parser.cpp pins this down
-// against a real sample payload.
-std::optional<BookUpdate> ParseBybitOrderbookMessage(const std::string& message, VenueId venue,
-                                                     InstrumentId instrument);
+// Stateful parser for one Bybit connection. Reuses the base Parser's simdjson
+// parser and input buffer, so a steady stream of messages does no per-message
+// allocation. NOT thread-safe: one instance per thread. Bybit gets its
+// snapshot on the WS stream (type == "snapshot", or u == 1 after a service
+// restart), so there is no separate REST-snapshot path.
+class BybitParser : public Parser {
+   public:
+    // venue_depth: this venue's resolved book-depth tier (ProviderConfig::depth).
+    // The bids/asks vectors of each parsed update are reserved to this size.
+    explicit BybitParser(uint32_t venue_depth);
+
+    // One Bybit orderbook.* message (v5 public/spot: {"topic","type","ts",
+    // "data":{...},"cts"}). The same shape serves both the depth topic
+    // (orderbook.50) and the fast-BBO topic (orderbook.1). Returns
+    // std::nullopt for non-orderbook messages (subscribe acks, pongs) and
+    // for malformed JSON. Never throws.
+    //
+    // KEY: fields are read in the SAME order they appear on the wire (topic,
+    // type, ts, then inside data: u, b, a). simdjson on-demand is a single
+    // forward pass; reordering these reads crashes (assertion), not just
+    // misparses. test_bybit_parser.cpp pins this down against a real sample.
+    std::optional<BookUpdate> ParseOrderbookMessage(std::string_view message, VenueId venue, InstrumentId instrument);
+};
 
 }  // namespace market_data

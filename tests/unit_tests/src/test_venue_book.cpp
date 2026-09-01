@@ -10,13 +10,7 @@ using namespace market_data;
 namespace {
 
 BookUpdate MakeUpdate(uint64_t seq, bool is_snapshot, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
-    BookUpdate update{};
-    update.venue = VenueId::BINANCE;
-    update.instrument = InstrumentId::BTCUSDT;
-    update.seq = seq;
-    update.recv_ts_ns = 0;
-    update.exch_ts_ns = 0;
-    update.is_snapshot = is_snapshot;
+    BookUpdate update{VenueId::BINANCE, InstrumentId::BTCUSDT, bids.size(), is_snapshot, seq};
     update.bids = std::move(bids);
     update.asks = std::move(asks);
     return update;

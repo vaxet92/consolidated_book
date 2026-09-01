@@ -1,36 +1,45 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <string_view>
 
-// Parses a decimal string like "0.0024" into a scaled uint64_t (x scale
-// digits, default 1e8 - matching PriceTicks/QtyUnits). No floating point
-// anywhere: venue prices/quantities arrive as JSON strings specifically so
-// they can be parsed exactly, and doing that through a double would
-// reintroduce the rounding-error problem CLAUDE.md §7 rules out.
-inline uint64_t ParseScaledDecimal(std::string_view sv, int scale_digits = 8) {
-    size_t dot_pos = sv.find('.');
-    std::string_view int_str = (dot_pos == std::string_view::npos) ? sv : sv.substr(0, dot_pos);
-    std::string_view frac_str = (dot_pos == std::string_view::npos) ? std::string_view{} : sv.substr(dot_pos + 1);
+namespace market_data {
 
-    uint64_t integer_part = 0;
-    for (char c : int_str) {
-        integer_part = integer_part * 10 + static_cast<uint64_t>(c - '0');
+// 10^n for n in [0, 8]. `scale` must stay in this range.
+inline constexpr uint64_t kMultipliers[] = {1ULL,       10ULL,        100ULL,        1'000ULL,      10'000ULL,
+                                            100'000ULL, 1'000'000ULL, 10'000'000ULL, 100'000'000ULL};
+
+// Parses a decimal string like "0.0024" into a scaled uint64_t (default 1e8,
+// matching PriceTicks/QtyUnits). No floating point: venue prices/quantities
+// arrive as JSON strings so they can be parsed exactly; a double would
+// reintroduce rounding error (CLAUDE.md section 7). Extra fractional digits
+// beyond `scale` are truncated. `scale` must be 0..8.
+template <uint64_t Scale = 8>
+inline uint64_t ParseScaledDecimal(std::string_view sv) noexcept {
+    static_assert(Scale <= 8, "Scale must be 0..8 (index into kMultipliers)");
+
+    uint64_t value = 0;
+    size_t dot_pos = 0;
+    for (; dot_pos < sv.size(); ++dot_pos) {
+        const char c = sv[dot_pos];
+        if (c == '.') {
+            break;
+        }
+        value = value * 10 + static_cast<uint64_t>(c - '0');
     }
 
-    uint64_t fractional_part = 0;
-    int fractional_digits = 0;
-    for (char c : frac_str) {
-        if (fractional_digits >= scale_digits) break;
-        fractional_part = fractional_part * 10 + static_cast<uint64_t>(c - '0');
-        ++fractional_digits;
-    }
-    for (; fractional_digits < scale_digits; ++fractional_digits) {
-        fractional_part *= 10;  // pad missing digits, e.g. "0.5" at scale 8 -> 50000000
+    if (dot_pos == sv.size()) {
+        return value * kMultipliers[Scale];  // integer string, no fractional part
     }
 
-    uint64_t scale = 1;
-    for (int i = 0; i < scale_digits; ++i) scale *= 10;
-
-    return integer_part * scale + fractional_part;
+    const size_t fractional_digits = sv.size() - dot_pos - 1;
+    const size_t digits_to_parse = std::min<size_t>(fractional_digits, Scale);
+    for (size_t i = 0; i < digits_to_parse; ++i) {
+        value = value * 10 + static_cast<uint64_t>(sv[dot_pos + 1 + i] - '0');
+    }
+    value *= kMultipliers[Scale - digits_to_parse];
+    return value;
 }
+
+}  // namespace market_data

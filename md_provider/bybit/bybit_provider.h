@@ -1,6 +1,7 @@
 #pragma once
 
 #include "md_provider/md_provider.h"
+#include "bybit_parser.h"
 #include "types/venue.h"
 #include <string>
 
@@ -28,6 +29,11 @@ class BybitProvider : public Provider {
     // it by exactly 1 per delta, so any other step is a gap. 0 means "no
     // snapshot yet" - only touched on the io_context thread, so no lock.
     uint64_t last_depth_u_{};
+
+    // Both OnDepthMessage and OnBboMessage run on the one io_context thread
+    // and both use this parser (the orderbook.* shape is the same for the
+    // depth and fast-BBO topics). No detached REST-snapshot path on Bybit.
+    BybitParser parser_;
 };
 
 }  // namespace market_data

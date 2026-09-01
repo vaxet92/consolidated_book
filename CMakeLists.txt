@@ -15,6 +15,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(BUILD_TESTS "Build unit tests" ON)
 option(BUILD_SERVER "Build server app" ON)
+option(BUILD_BENCHMARKS "Build latency micro-benchmarks" OFF)
 
 add_subdirectory(types)
 add_subdirectory(config)
@@ -35,4 +36,8 @@ if (BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests/unit_tests)
   add_subdirectory(tests/mock_tests)
+endif()
+
+if (BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()

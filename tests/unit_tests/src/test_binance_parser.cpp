@@ -33,14 +33,15 @@ constexpr const char* kBboMessage = R"({
 }  // namespace
 
 TEST(BinanceParserTest, ParsesDepthUpdateMessage) {
-    auto update = ParseBinanceDepthMessage(kDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    BinanceParser parser(/*venue_depth=*/20);
+    auto update = parser.ParseDepthMessage(kDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(update.has_value());
     EXPECT_EQ(update->venue, VenueId::BINANCE);
     EXPECT_EQ(update->instrument, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update->is_snapshot);
     EXPECT_EQ(update->seq, 160u);
-    EXPECT_EQ(update->exch_ts_ns, 1672515782136LL * 1'000'000);
+    EXPECT_EQ(update->exch_ts_ns, 1672515782136LL * kTsNsMultiplier);
 
     ASSERT_EQ(update->bids.size(), 1u);
     EXPECT_EQ(update->bids[0].price, 240000ull);    // 0.0024 * 1e8
@@ -52,17 +53,20 @@ TEST(BinanceParserTest, ParsesDepthUpdateMessage) {
 }
 
 TEST(BinanceParserTest, IgnoresNonDepthUpdateMessages) {
-    auto update = ParseBinanceDepthMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    BinanceParser parser(/*venue_depth=*/20);
+    auto update = parser.ParseDepthMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(BinanceParserTest, DepthMalformedJsonReturnsNulloptNotACrash) {
-    auto update = ParseBinanceDepthMessage("{not valid json", VenueId::BINANCE, InstrumentId::BTCUSDT);
+    BinanceParser parser(/*venue_depth=*/20);
+    auto update = parser.ParseDepthMessage("{not valid json", VenueId::BINANCE, InstrumentId::BTCUSDT);
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(BinanceParserTest, ParsesBookTickerMessage) {
-    auto quote = ParseBinanceBboMessage(kBboMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    BinanceParser parser(/*venue_depth=*/20);
+    auto quote = parser.ParseBboMessage(kBboMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
 
     ASSERT_TRUE(quote.has_value());
     EXPECT_EQ(quote->venue, VenueId::BINANCE);
@@ -75,6 +79,7 @@ TEST(BinanceParserTest, ParsesBookTickerMessage) {
 }
 
 TEST(BinanceParserTest, IgnoresNonBookTickerMessages) {
-    auto quote = ParseBinanceBboMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    BinanceParser parser(/*venue_depth=*/20);
+    auto quote = parser.ParseBboMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
     EXPECT_FALSE(quote.has_value());
 }
