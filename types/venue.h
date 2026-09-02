@@ -54,6 +54,55 @@ inline constexpr std::string_view kOkxHost = "ws.okx.com";
 inline constexpr std::string_view kOkxPort = "443";
 static constexpr std::string_view kOkxPath = "/ws/v5/public";
 
+// Staleness backstops, per venue AND per stream (DESIGN_1 §6.2c).
+//
+// KEY: two of these are DERIVED from behaviour the venue documents about
+// itself; the rest are placeholders and are labelled as such. "Bybit L1 must
+// speak every 3 seconds because Bybit says it does" is defensible in a
+// debrief. "30 seconds felt about right" is not - so where a number is a
+// guess, it says so rather than pretending otherwise.
+//
+// KEY: too SHORT is the dangerous direction. A backstop below a venue's real
+// quiet interval marks a healthy feed stale and flaps it in and out of the
+// merge, which is worse than having no watchdog at all. Every placeholder
+// below is therefore generous. These are BACKSTOPS, not detectors - fast
+// detection is meant to come from connection state and, once built,
+// cross-venue corroboration (§6.2b signal 3).
+namespace staleness {
+
+inline constexpr int64_t kSecondNs = 1'000'000'000;
+
+// DERIVED: Bybit republishes L1 (orderbook.1, our BBO stream) with the same
+// `u` after 3s of no book change. Silence past ~3x that is the venue breaking
+// a promise it makes about itself, not a quiet market.
+inline constexpr int64_t kBybitBboBackstopNs = 10 * kSecondNs;
+
+// PLACEHOLDER: the 3s republish is documented for L1 only. orderbook.50 has
+// no documented keepalive, so this is a guess pending measurement.
+inline constexpr int64_t kBybitDepthBackstopNs = 30 * kSecondNs;
+
+// DERIVED: OKX sends seqId == prevSeqId with empty sides after roughly 60s of
+// no change on the `books` channel. 90s leaves margin for a missed keepalive.
+//
+// Far too slow to be a detector on its own - a dead OKX depth feed would go
+// unnoticed for up to 90s on this signal alone. Connection state catches the
+// common case immediately; cross-venue comparison is what will close the rest.
+inline constexpr int64_t kOkxDepthBackstopNs = 90 * kSecondNs;
+
+// PLACEHOLDER: whether bbo-tbt has its own keepalive is unverified.
+inline constexpr int64_t kOkxBboBackstopNs = 30 * kSecondNs;
+
+// PLACEHOLDER, and the weakest case. Binance publishes NO keepalive on either
+// stream - it sends nothing when nothing changes, so silence carries no
+// information at all and a quiet market is indistinguishable from a dead feed.
+// These numbers cannot be derived from anything, only measured. Until
+// cross-venue corroboration exists, connection state is the only fast signal
+// Binance gives us.
+inline constexpr int64_t kBinanceDepthBackstopNs = 30 * kSecondNs;
+inline constexpr int64_t kBinanceBboBackstopNs = 30 * kSecondNs;
+
+}  // namespace staleness
+
 class VenueConverter {
    public:
     VenueConverter() = delete;

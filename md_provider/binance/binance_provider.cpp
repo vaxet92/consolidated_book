@@ -132,6 +132,19 @@ void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_i
     }
     update->recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
 
+    // KEY: Binance is the venue with NO keepalive. Its diff stream sends
+    // nothing when nothing changes, so unlike Bybit L1 (3s republish) and OKX
+    // books (~60s seqId == prevSeqId), silence here carries no information at
+    // all - it is a quiet market and a dead feed at once. This stamp
+    // therefore records real data only, and Binance's health has to come from
+    // connection state plus comparison against the other venues. That is
+    // precisely why cross-venue corroboration is not optional.
+    //
+    // Still stamped before the dedup, for consistency with the other two: a
+    // duplicate from a redundant connection is bytes on the wire and proves
+    // the feed is delivering, even though it is dropped as a book update.
+    NoteDepthActivity();
+
     // Redundant-connection dedup, BEFORE the sync branch below - not after.
     //
     // KEY: during kSyncing every event is buffered into pending_, so a
@@ -183,6 +196,10 @@ void BinanceProvider::OnBboMessage(const std::string& message, uint32_t conn_ind
     if (!quote) {
         return;  // not a bookTicker payload (e.g. a subscribe ack)
     }
+
+    // Same as the depth stream: @bookTicker has no keepalive either, so this
+    // records real data only.
+    NoteBboActivity();
 
     // Separate filter from the depth stream: @bookTicker and @depth carry
     // independent `u` sequences, so a shared high-water mark would silently

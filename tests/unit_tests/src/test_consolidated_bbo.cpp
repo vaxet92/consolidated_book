@@ -230,3 +230,149 @@ TEST(ConsolidatedBboTest, UnconfiguredVenueSlotIsSkippedNotCrashed) {
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
     EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
 }
+
+// ------------------------------------------------- staleness admission ------
+
+namespace {
+
+using market_data::consolidated::BBO;
+using market_data::consolidated::ComputeBBOFromQuotes;
+using market_data::consolidated::ComputeBBOFromQuotesInto;
+using market_data::consolidated::UpdateBBOWithQuote;
+
+VenueHealthArray BboHealth(VenueHealth binance, VenueHealth bybit, VenueHealth okx) {
+    VenueHealthArray health{};
+    health[static_cast<size_t>(VenueId::BINANCE)] = binance;
+    health[static_cast<size_t>(VenueId::BYBIT)] = bybit;
+    health[static_cast<size_t>(VenueId::OKX)] = okx;
+    return health;
+}
+
+constexpr auto kLive = VenueHealth::kLive;
+constexpr auto kStale = VenueHealth::kStale;
+
+}  // namespace
+
+TEST(ConsolidatedBboTest, FullScanExcludesAStaleVenue) {
+    VenueQuoteArray quotes{};
+    quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
+
+    const auto health = BboHealth(kStale, kLive, kLive);
+    BBO bbo = ComputeBBOFromQuotes(quotes, &health);
+
+    EXPECT_EQ(bbo.best_bid.price, 49900u);
+    ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
+    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(bbo.best_ask.price, 49910u);
+}
+
+// A stale venue's quote is folded in as though it carried no prices. Not a
+// shortcut - "has no bid" and "its bid may not be used" have the same effect
+// on the top of book, so the existing price == 0 branch does the work.
+TEST(ConsolidatedBboTest, AStaleVenuesOwnQuoteIsTreatedAsNoPrice) {
+    VenueQuoteArray quotes{};
+    BBO bbo;
+    const auto health = BboHealth(kStale, kLive, kLive);
+
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], quotes, &health);
+    ASSERT_EQ(bbo.best_bid.price, 49900u);
+
+    // BINANCE is stale and quotes a BETTER bid. It must not take the level.
+    quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BINANCE)], quotes, &health);
+
+    EXPECT_EQ(bbo.best_bid.price, 49900u) << "a stale venue must not win the best bid";
+    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+}
+
+// THE REASON THE RESCAN EXISTS. This test asserts the BROKEN behaviour on
+// purpose, to document why filtering alone is not enough.
+//
+// BINANCE's price is folded in while it is live. It then goes stale and stops
+// quoting. Filtering its FUTURE quotes achieves nothing - it sends none - and
+// the incremental path only ever holds the top level, so nothing displaces
+// the price already sitting there.
+TEST(ConsolidatedBboTest, IncrementalCannotRemoveAPriceAlreadyFoldedIn) {
+    VenueQuoteArray quotes{};
+    BBO bbo;
+
+    // Both live. BINANCE owns the best bid.
+    auto health = BboHealth(kLive, kLive, kLive);
+    quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BINANCE)], quotes, &health);
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], quotes, &health);
+    ASSERT_EQ(bbo.best_bid.price, 50000u);
+    ASSERT_EQ(bbo.best_bid.venues[0].venue, VenueId::BINANCE);
+
+    // BINANCE goes stale. Only BYBIT keeps quoting.
+    health = BboHealth(kStale, kLive, kLive);
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49895, 3, 49905, 3);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], quotes, &health);
+
+    // Asserted deliberately: the incremental path leaves the stale price in
+    // place. If this ever starts failing, the incremental path learned to
+    // handle transitions and Core's version counter may be removable.
+    EXPECT_EQ(bbo.best_bid.price, 50000u) << "incremental filtering alone cannot evict an already-folded price";
+    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BINANCE);
+
+    // The rescan is what fixes it - this is what Core does on a health change.
+    ComputeBBOFromQuotesInto(quotes, bbo, &health);
+    EXPECT_EQ(bbo.best_bid.price, 49895u);
+    ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
+    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+}
+
+// The in-place rescan must reuse the caller's buffers rather than replacing
+// them - Core::Init reserves those vectors so the hot path never allocates
+// (DESIGN_1 §7.5), and assigning a by-value BBO over them would discard it.
+TEST(ConsolidatedBboTest, InPlaceRescanKeepsReservedCapacity) {
+    VenueQuoteArray quotes{};
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
+
+    BBO bbo;
+    bbo.best_bid.venues.reserve(kVenueCount);
+    bbo.best_ask.venues.reserve(kVenueCount);
+    const size_t bid_capacity = bbo.best_bid.venues.capacity();
+
+    ComputeBBOFromQuotesInto(quotes, bbo, nullptr);
+
+    EXPECT_GE(bbo.best_bid.venues.capacity(), bid_capacity) << "rescan must not shrink the reserved buffer";
+    EXPECT_EQ(bbo.best_bid.price, 49900u);
+}
+
+// The by-value and in-place forms must agree - one delegates to the other, and
+// this pins that so they cannot drift into two implementations.
+TEST(ConsolidatedBboTest, InPlaceAndByValueAgree) {
+    VenueQuoteArray quotes{};
+    quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 50000, 5, 49990, 1);
+    const auto health = BboHealth(kLive, kLive, kStale);
+
+    BBO by_value = ComputeBBOFromQuotes(quotes, &health);
+    BBO in_place;
+    ComputeBBOFromQuotesInto(quotes, in_place, &health);
+
+    EXPECT_EQ(by_value.best_bid.price, in_place.best_bid.price);
+    EXPECT_EQ(by_value.best_bid.total_qty, in_place.best_bid.total_qty);
+    EXPECT_EQ(by_value.best_bid.venues.size(), in_place.best_bid.venues.size());
+    EXPECT_EQ(by_value.best_ask.price, in_place.best_ask.price);
+    EXPECT_EQ(by_value.crossed, in_place.crossed);
+}
+
+// Every venue stale: publish nothing rather than three frozen prices.
+TEST(ConsolidatedBboTest, AllVenuesStaleProducesAnEmptyBbo) {
+    VenueQuoteArray quotes{};
+    quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
+    quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
+
+    const auto health = BboHealth(kStale, kStale, kStale);
+    BBO bbo = ComputeBBOFromQuotes(quotes, &health);
+
+    EXPECT_EQ(bbo.best_bid.price, 0u);
+    EXPECT_EQ(bbo.best_ask.price, 0u);
+    EXPECT_TRUE(bbo.best_bid.venues.empty());
+    EXPECT_FALSE(bbo.crossed) << "an empty book is not a crossed book";
+}

@@ -8,6 +8,7 @@ Provider::Provider(const ProviderConfig& config, CallBack callback, QuoteCallBac
     : config(config),
       running(false),
       ssl_ctx(ssl::context::tlsv12_client),
+      health_timer_(ioc),
       reconnect_count(0),
       callback_(std::move(callback)),
       quote_callback_(std::move(quote_callback)) {
@@ -89,6 +90,11 @@ void Provider::Run() {
                 CreateDepthSession(i);
                 CreateBboSession(i);
             }
+
+            // Armed AFTER the sessions exist, so the first tick sees the real
+            // live counts rather than zero and does not report a spurious
+            // kDisconnected on every startup.
+            ScheduleHealthCheck();
 
             // Run the io_context - drives every session on this one thread,
             // which is why none of the per-session state needs a lock.
@@ -199,6 +205,83 @@ void Provider::OnBboSessionClosed(uint32_t index) {
                 VenueConverter::ToVenueString(config.venue_id), index + 1, bbo_sessions_.size(), bbo_live_);
 }
 
+void Provider::ScheduleHealthCheck() {
+    health_timer_.expires_after(std::chrono::milliseconds(HEALTH_CHECK_INTERVAL_MS));
+    health_timer_.async_wait([this](const boost::system::error_code& ec) {
+        // operation_aborted is the normal path on Stop()/RequestResync(),
+        // which cancel the timer. Anything else and we simply stop
+        // rescheduling rather than spinning on a broken timer.
+        if (ec) {
+            return;
+        }
+        CheckHealth();
+
+        // KEY: the timer must NOT rearm once every socket on both streams is
+        // gone. ioc.run() returns only when no work remains, and a repeating
+        // timer is work forever - so rescheduling unconditionally would keep
+        // run() from ever returning, the reconnect path in Run() would never
+        // execute, and a fully disconnected venue would stay dead for the
+        // life of the process.
+        //
+        // The CheckHealth() above has already published kDisconnected for
+        // both streams by this point, so stopping here loses no signal: the
+        // last thing the timer does is report the outage, then it gets out of
+        // the way so the reconnect can happen.
+        if (running && (depth_live_ > 0 || bbo_live_ > 0)) {
+            ScheduleHealthCheck();
+        }
+    });
+}
+
+void Provider::CheckHealth() {
+    const int64_t now = GetMonotonicNs();
+
+    // KEY: "connected" is depth_live_ > 0, not "all sockets up". With
+    // redundant connections, one socket dying leaves the others delivering
+    // the same data - the venue is still healthy and must not be excluded.
+    // Only a total loss of the stream is evidence of anything.
+    //
+    // kResyncing is left alone. A timer has nothing useful to say about a
+    // stream we switched off ourselves: it would report kStale once the old
+    // stamp aged past the backstop, or kNoData if the stamp were cleared -
+    // both less informative than "we are rebuilding this", and both would
+    // overwrite it. The state is cleared by the first message that arrives
+    // after the venue comes back (see NeedsImmediatePromotion).
+    if (last_depth_health_ != VenueHealth::kResyncing) {
+        PublishHealth(StreamKind::kDepth,
+                      ClassifyFeed(depth_live_ > 0, last_depth_message_mono_ns_, now, config.depth_backstop_ns));
+    }
+    if (last_bbo_health_ != VenueHealth::kResyncing) {
+        PublishHealth(StreamKind::kBbo,
+                      ClassifyFeed(bbo_live_ > 0, last_bbo_message_mono_ns_, now, config.bbo_backstop_ns));
+    }
+}
+
+void Provider::PublishHealth(StreamKind stream, VenueHealth health) {
+    VenueHealth& previous = (stream == StreamKind::kDepth) ? last_depth_health_ : last_bbo_health_;
+    if (health == previous) {
+        return;  // edge-triggered - nothing changed, say nothing
+    }
+
+    const char* stream_name = (stream == StreamKind::kDepth) ? "depth" : "bbo";
+    Logger::Log(health == VenueHealth::kLive ? LogLevel::kInfo : LogLevel::kWarning, "[{}] {} health: {} -> {}",
+                VenueConverter::ToVenueString(config.venue_id), stream_name, ToString(previous), ToString(health));
+
+    previous = health;
+
+    if (health_callback_) {
+        // decided_mono_ns, not the time Core reads it: once this travels
+        // through an SPSC queue it is consumed later than it was produced,
+        // and the verdict has to carry its own timestamp to stay meaningful.
+        health_callback_(VenueHealthEvent{
+            .venue = config.venue_id,
+            .stream = stream,
+            .health = health,
+            .decided_mono_ns = GetMonotonicNs(),
+        });
+    }
+}
+
 bool Provider::AcceptDepth(uint64_t id, uint32_t conn_index, bool venue_reset) {
     // No per-socket adjustment: venue_reset already means "the id moves
     // backwards", and an ordinary snapshot passes false so the `<=` rule
@@ -257,6 +340,20 @@ void Provider::PostToIoContext(std::function<void()> fn) {
 
 void Provider::RequestResync() {
     resync_requested_ = true;
+
+    // KEY: announced BEFORE the sockets are torn down, and this ordering is
+    // the whole fix. Stop() sets `stopped`, which suppresses NotifyClosed() -
+    // so depth_live_ never drops, health would stay kLive, and Core would go
+    // on merging a book we have already decided is WRONG for the entire
+    // resync window. Every update from the other venues during that window
+    // publishes a consolidated book containing known-bad levels.
+    //
+    // Both streams, not just depth: the gap is a depth-stream fact, but this
+    // function stops every socket on both, so neither will deliver until the
+    // provider comes back. A venue that cannot send is not one to merge.
+    PublishHealth(StreamKind::kDepth, VenueHealth::kResyncing);
+    PublishHealth(StreamKind::kBbo, VenueHealth::kResyncing);
+
     // Every socket on both streams goes down: a gap means the book is WRONG,
     // and no surviving connection can repair that - they all carry the same
     // broken sequence. This is the one case where redundancy does not help.

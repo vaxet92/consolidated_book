@@ -355,3 +355,203 @@ TEST(ConsolidatedBookTest, MultiBpsBandMatchesRepeatedSingleCalls) {
         EXPECT_EQ(multi[i].vwap, single.vwap) << "band " << i;
     }
 }
+
+// ------------------------------------------------- staleness admission ------
+//
+// These cover the MECHANISM only: given a health verdict, does the merge
+// honour it. HOW a venue is judged stale is policy, decided in Core, and is
+// tested separately - which is the point of keeping MergeBooks a pure
+// function of what it is handed.
+
+namespace {
+
+VenueHealthArray Health(VenueHealth binance, VenueHealth bybit, VenueHealth okx) {
+    VenueHealthArray health{};
+    health[static_cast<size_t>(VenueId::BINANCE)] = binance;
+    health[static_cast<size_t>(VenueId::BYBIT)] = bybit;
+    health[static_cast<size_t>(VenueId::OKX)] = okx;
+    return health;
+}
+
+constexpr auto kLive = VenueHealth::kLive;
+constexpr auto kStale = VenueHealth::kStale;
+constexpr auto kNoData = VenueHealth::kNoData;
+constexpr auto kDisconnected = VenueHealth::kDisconnected;
+
+}  // namespace
+
+// Pins the defaulted nullptr. Every other MergeBooks test in this file relies
+// on it, so if it ever changed meaning those tests would start asserting
+// something different without saying so.
+TEST(ConsolidatedBookTest, NullHealthAdmitsEveryVenue) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+    SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 1}});
+    Book merged;
+
+    MergeBooks(books, merged, kDefaultMaxDepth, nullptr);
+
+    ASSERT_EQ(merged.bids.size(), 2u);
+    EXPECT_EQ(merged.bids[0].price, 100u);
+    EXPECT_EQ(merged.bids[1].price, 99u);
+}
+
+TEST(ConsolidatedBookTest, StaleVenueContributesNoLevels) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+    SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
+    Book merged;
+
+    const auto health = Health(kStale, kLive, kLive);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    ASSERT_EQ(merged.bids.size(), 1u);
+    EXPECT_EQ(merged.bids[0].price, 99u);
+    EXPECT_EQ(merged.bids[0].cum_qty, 7u);
+    ASSERT_EQ(merged.asks.size(), 1u);
+    EXPECT_EQ(merged.asks[0].price, 102u);
+}
+
+// The reason the whole staleness policy exists.
+//
+// BINANCE is frozen at prices from before the market moved. Because the merge
+// takes max(bid) and min(ask), a frozen venue does not merely add noise - it
+// WINS. Here it wins both sides at once and produces a CROSSED consolidated
+// book: a phantom 90-tick arbitrage that no one can trade.
+TEST(ConsolidatedBookTest, FrozenVenueNoLongerWinsTheBestBid) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{50000, 2}}, {{50010, 2}});  // frozen, pre-move
+    SetBook(books, VenueId::BYBIT, {{49900, 3}}, {{49910, 3}});    // live, market fell
+    SetBook(books, VenueId::OKX, {{49899, 4}}, {{49911, 4}});      // live
+    Book merged;
+
+    // Admitting the frozen venue: it takes the best bid, and the book crosses.
+    MergeBooks(books, merged, kDefaultMaxDepth, nullptr);
+    EXPECT_EQ(merged.bids[0].price, 50000u);
+    EXPECT_EQ(merged.asks[0].price, 49910u);
+    EXPECT_GT(merged.bids[0].price, merged.asks[0].price) << "expected the frozen venue to cross the book";
+
+    // Excluding it: both sides come from live venues, and the cross is gone.
+    const auto health = Health(kStale, kLive, kLive);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    ASSERT_FALSE(merged.bids.empty());
+    ASSERT_FALSE(merged.asks.empty());
+    EXPECT_EQ(merged.bids[0].price, 49900u);
+    EXPECT_EQ(merged.asks[0].price, 49910u);
+    EXPECT_LT(merged.bids[0].price, merged.asks[0].price);
+}
+
+// kNoData must be excluded on its own merits, not because its book happens to
+// be empty. Relying on "a venue with no data has nothing to contribute" makes
+// admission depend on a second, unrelated invariant - so this test gives the
+// kNoData venue a full book to make sure the verdict is what excludes it.
+TEST(ConsolidatedBookTest, NoDataVenueIsExcludedToo) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+    SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
+    Book merged;
+
+    const auto health = Health(kNoData, kLive, kLive);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    ASSERT_EQ(merged.bids.size(), 1u);
+    EXPECT_EQ(merged.bids[0].price, 99u);
+}
+
+// Total outage. Publishing nothing is honest; publishing three frozen books
+// is a lie the client cannot detect.
+TEST(ConsolidatedBookTest, AllVenuesStaleProducesEmptyBook) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+    SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
+    SetBook(books, VenueId::OKX, {{98, 2}}, {{103, 2}});
+    Book merged;
+
+    const auto health = Health(kStale, kStale, kStale);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    EXPECT_TRUE(merged.bids.empty());
+    EXPECT_TRUE(merged.asks.empty());
+}
+
+// Excluding a venue must remove it from the per-level attribution too, not
+// only from the totals. A client reading `venues` to see who is quoting must
+// never be told a stale venue is still there.
+TEST(ConsolidatedBookTest, ExcludedVenueDisappearsFromAttribution) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+    SetBook(books, VenueId::BYBIT, {{100, 7}}, {{101, 3}});  // same price - ties
+    Book merged;
+
+    const auto health = Health(kStale, kLive, kLive);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    ASSERT_EQ(merged.bids.size(), 1u);
+    EXPECT_EQ(merged.bids[0].venue_count, 1u);
+    EXPECT_EQ(merged.bids[0].venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(merged.bids[0].cum_qty, 7u) << "BINANCE's quantity must not be counted";
+}
+
+// Book buffers are pooled and reused (Core::AcquireBookBuffer), and Clear()
+// deliberately keeps capacity. So "the merge is a full rebuild" is only true
+// if Clear() resets CONTENT, not just size. If it did not, a venue that went
+// stale would leave its levels behind in a recycled buffer - and the bug
+// would appear only after warm-up, when reuse begins.
+TEST(ConsolidatedBookTest, ReusedBufferDropsAVenueThatWentStale) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+    SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
+
+    Book merged;
+    MergeBooks(books, merged, kDefaultMaxDepth, nullptr);
+    ASSERT_EQ(merged.bids.size(), 2u);
+
+    // Same buffer, second merge, BINANCE now stale.
+    const auto health = Health(kStale, kLive, kLive);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    ASSERT_EQ(merged.bids.size(), 1u);
+    EXPECT_EQ(merged.bids[0].price, 99u);
+    EXPECT_EQ(merged.bids[0].cum_qty, 7u);
+    EXPECT_EQ(merged.bids[0].venue_count, 1u);
+    EXPECT_EQ(merged.bids[0].venues[0].venue, VenueId::BYBIT);
+}
+
+// kDisconnected is the verdict we can make with certainty - every socket for
+// this venue's stream is down - so it must be excluded just as firmly as
+// kStale. Unlike kStale it says nothing about the book's CONTENT: the levels
+// may be only milliseconds old. They are still refused, because without a
+// connection there is no way to learn that they have stopped being true.
+TEST(ConsolidatedBookTest, DisconnectedVenueIsExcluded) {
+    VenueBookArray books{};
+    SetBook(books, VenueId::BINANCE, {{50000, 2}}, {{50010, 2}});
+    SetBook(books, VenueId::BYBIT, {{49900, 3}}, {{49910, 3}});
+    Book merged;
+
+    const auto health = Health(kDisconnected, kLive, kLive);
+    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+    ASSERT_EQ(merged.bids.size(), 1u);
+    EXPECT_EQ(merged.bids[0].price, 49900u);
+    EXPECT_EQ(merged.bids[0].venue_count, 1u);
+    EXPECT_EQ(merged.bids[0].venues[0].venue, VenueId::BYBIT);
+}
+
+// Each non-live state must exclude on its own. Testing them together would
+// let one of them silently start admitting - the merge would still look
+// correct, because the other two still exclude.
+TEST(ConsolidatedBookTest, EveryNonLiveStateExcludesIndependently) {
+    for (VenueHealth bad : {kStale, kNoData, kDisconnected, VenueHealth::kResyncing}) {
+        VenueBookArray books{};
+        SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
+        SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
+        Book merged;
+
+        const auto health = Health(bad, kLive, kLive);
+        MergeBooks(books, merged, kDefaultMaxDepth, &health);
+
+        ASSERT_EQ(merged.bids.size(), 1u) << "state " << static_cast<int>(bad);
+        EXPECT_EQ(merged.bids[0].price, 99u) << "state " << static_cast<int>(bad);
+    }
+}

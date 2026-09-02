@@ -7,6 +7,7 @@
 #include "consolidated_bbo.h"
 #include "types.h"
 #include "venue_book.h"
+#include "venue_health.h"
 
 namespace market_data {
 namespace consolidated {
@@ -73,7 +74,25 @@ inline constexpr size_t kDefaultMaxDepth = 1500;
 
 // Merges into `out`, reusing its buffers. Caller keeps one Book alive across
 // publishes rather than constructing a fresh one each time.
-void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth = kDefaultMaxDepth);
+//
+// `health` is the staleness verdict per venue (DESIGN_1 §6). A venue that is
+// not kLive contributes nothing to the merge.
+//
+// KEY: a stale venue must be EXCLUDED, not merely reported. The merge takes
+// max(bid) and min(ask); a frozen venue never moves, so when the market falls
+// it always looks like the best bid and when it rises it always looks like
+// the best ask. Staleness is not noise that averages out - the merge actively
+// selects for it, so one frozen venue out of three corrupts the output nearly
+// every time the market moves.
+//
+// nullptr admits every venue. That is the correct neutral default for a pure
+// merge function: it merges what it is given, and deciding what it is given
+// is the caller's policy decision, made in Core where the timestamps live.
+// The tests that exercise merge behaviour alone rely on this default, so the
+// guarantee that production never forgets to pass it is a Core-level test,
+// not this signature.
+void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth = kDefaultMaxDepth,
+                const VenueHealthArray* health = nullptr);
 
 // ---------------------------------------------------------------------------
 // Band math (§8.2 / §8.3). Both walk the same prefix-sum book; they differ

@@ -28,6 +28,11 @@ void BybitProvider::OnDepthMessage(const std::string& message, uint32_t conn_ind
         return;  // not an orderbook message (e.g. subscribe ack, pong)
     }
 
+    // The feed spoke. Stamped BEFORE the dedup below, so a republished
+    // message carrying a `u` we have already seen still counts as liveness
+    // even though it is correctly dropped as a book update.
+    NoteDepthActivity();
+
     // Redundant-connection dedup. Placement is the whole thing: AFTER the
     // parse, because the reset flag needs the parsed message, and BEFORE the
     // continuity check, because a duplicate looks to CheckBybitContinuity
@@ -76,6 +81,13 @@ void BybitProvider::OnBboMessage(const std::string& message, uint32_t conn_index
     if (!update) {
         return;  // not an orderbook message (e.g. subscribe ack, pong)
     }
+
+    // KEY: this is the tightest liveness signal any venue gives us. Bybit
+    // republishes L1 with the SAME `u` after 3 seconds of no book change, so
+    // silence on this stream beyond ~3s is evidence of a dead feed rather
+    // than a quiet market - no cross-venue comparison needed. AcceptBbo below
+    // drops the republish as a duplicate, which is why this must come first.
+    NoteBboActivity();
 
     // Separate filter from the depth stream: orderbook.1 and orderbook.50
     // carry independent `u` sequences, so a shared high-water mark would

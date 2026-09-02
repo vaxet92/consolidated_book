@@ -65,7 +65,8 @@ static void SetSingleVenue(ConsolidatedPriceLevel& level, PriceTicks price, Venu
 // path share exactly one implementation - and so a rescan only recomputes
 // the side that actually collapsed, not both. Fills `out` in place rather
 // than returning by value, so the rescan path also reuses its buffer.
-static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out) {
+static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out,
+                        const VenueHealthArray* health) {
     out.price = 0;
     out.total_qty = 0;
     out.venues.clear();
@@ -73,6 +74,14 @@ static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& o
         const BboQuote& quote = quotes[i];
         if (quote.bid_price == 0) {
             continue;  // venue has sent no quote yet
+        }
+        // The staleness filter lives HERE, in the shared scan, rather than in
+        // each caller - which is what makes ComputeBBOFromQuotes and the
+        // rescan path inside UpdateBBOWithQuote agree by construction. Two
+        // copies of this rule could disagree, and the disagreement would only
+        // show on the rare rescan path.
+        if (health != nullptr && !IsAdmissible((*health)[i])) {
+            continue;
         }
         VenueId venue = static_cast<VenueId>(i);
         if (out.price == 0 || quote.bid_price > out.price) {
@@ -84,13 +93,17 @@ static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& o
     }
 }
 
-static void ScanBestAsk(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out) {
+static void ScanBestAsk(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out,
+                        const VenueHealthArray* health) {
     out.price = 0;
     out.total_qty = 0;
     out.venues.clear();
     for (size_t i = 0; i < quotes.size(); ++i) {
         const BboQuote& quote = quotes[i];
         if (quote.ask_price == 0) {
+            continue;
+        }
+        if (health != nullptr && !IsAdmissible((*health)[i])) {
             continue;
         }
         VenueId venue = static_cast<VenueId>(i);
@@ -143,29 +156,46 @@ static bool IsCrossed(const ConsolidatedPriceLevel& bid, const ConsolidatedPrice
     return (bid.price && ask.price) && bid.price >= ask.price;
 }
 
-BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes) {
+void ComputeBBOFromQuotesInto(const VenueQuoteArray& quotes, BBO& out, const VenueHealthArray* health) {
+    ScanBestBid(quotes, out.best_bid, health);
+    ScanBestAsk(quotes, out.best_ask, health);
+    out.crossed = IsCrossed(out.best_bid, out.best_ask);
+}
+
+BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes, const VenueHealthArray* health) {
     // Returns by value: this is the oracle and the initial build, not a hot
-    // path, so the fresh vectors here are fine. The hot path is
-    // UpdateBBOWithQuote, which mutates in place.
+    // path, so the fresh vectors here are fine. Delegates rather than
+    // duplicating, so the two can never disagree.
     BBO result;
-    ScanBestBid(quotes, result.best_bid);
-    ScanBestAsk(quotes, result.best_ask);
-    result.crossed = IsCrossed(result.best_bid, result.best_ask);
+    ComputeBBOFromQuotesInto(quotes, result, health);
     return result;
 }
 
-void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes) {
+void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes,
+                        const VenueHealthArray* health) {
+    // A quote from a venue that is not admitted is folded in as though it
+    // carried no prices at all. That is not a shortcut: "this venue has no
+    // bid" and "this venue's bid may not be used" have the SAME effect on the
+    // consolidated top of book, and the price == 0 branches below already
+    // remove the venue from the best level and rescan if it was the last one
+    // there. Adding a separate exclusion path would duplicate that logic.
+    const size_t venue_index = static_cast<size_t>(update.venue);
+    const bool admitted =
+        health == nullptr || venue_index >= kVenueCount || IsAdmissible((*health)[venue_index]);
+    const PriceTicks bid_price = admitted ? update.bid_price : 0;
+    const PriceTicks ask_price = admitted ? update.ask_price : 0;
+
     // ---- bid side: better means HIGHER ----
     ConsolidatedPriceLevel& best_bid = current.best_bid;
-    if (update.bid_price == 0) {
+    if (bid_price == 0) {
         // Venue has no bid at all. If it was holding the best level, it left.
         if (UpdateWorstPrice(best_bid, update.venue) && best_bid.venues.empty()) {
-            ScanBestBid(quotes, best_bid);
+            ScanBestBid(quotes, best_bid, health);
         }
-    } else if (best_bid.price == 0 || update.bid_price > best_bid.price) {
+    } else if (best_bid.price == 0 || bid_price > best_bid.price) {
         // Strictly better (or first data): this venue alone owns the level.
-        SetSingleVenue(best_bid, update.bid_price, update.venue, update.bid_qty);
-    } else if (update.bid_price == best_bid.price) {
+        SetSingleVenue(best_bid, bid_price, update.venue, update.bid_qty);
+    } else if (bid_price == best_bid.price) {
         UpdateEqualPrice(best_bid, update.venue, update.bid_qty);
     } else {
         // Worse than the best. Only matters if this venue WAS holding the
@@ -174,23 +204,23 @@ void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteAr
             // The best level lost its last venue. The new best is not
             // recoverable from `current` alone - it only ever kept the top
             // level - so rescan the per-venue array.
-            ScanBestBid(quotes, best_bid);
+            ScanBestBid(quotes, best_bid, health);
         }
     }
 
     // ---- ask side: better means LOWER ----
     ConsolidatedPriceLevel& best_ask = current.best_ask;
-    if (update.ask_price == 0) {
+    if (ask_price == 0) {
         if (UpdateWorstPrice(best_ask, update.venue) && best_ask.venues.empty()) {
-            ScanBestAsk(quotes, best_ask);
+            ScanBestAsk(quotes, best_ask, health);
         }
-    } else if (best_ask.price == 0 || update.ask_price < best_ask.price) {
-        SetSingleVenue(best_ask, update.ask_price, update.venue, update.ask_qty);
-    } else if (update.ask_price == best_ask.price) {
+    } else if (best_ask.price == 0 || ask_price < best_ask.price) {
+        SetSingleVenue(best_ask, ask_price, update.venue, update.ask_qty);
+    } else if (ask_price == best_ask.price) {
         UpdateEqualPrice(best_ask, update.venue, update.ask_qty);
     } else {
         if (UpdateWorstPrice(best_ask, update.venue) && best_ask.venues.empty()) {
-            ScanBestAsk(quotes, best_ask);
+            ScanBestAsk(quotes, best_ask, health);
         }
     }
 

@@ -42,6 +42,19 @@ void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index
         return;  // not a books update (e.g. subscribe ack, pong)
     }
 
+    // KEY: OKX proves liveness by sending seqId == prevSeqId with empty
+    // bids/asks after roughly 60 seconds of no book change. That id is one we
+    // have already seen, so AcceptDepth below drops it - and the kIgnore
+    // branch in CheckOkxContinuity that documents this keepalive sits behind
+    // the filter and never runs for it. Stamping here is what preserves the
+    // signal.
+    //
+    // 60s is a long backstop compared with Bybit's 3s on L1, so OKX depth
+    // still needs connection state and cross-venue comparison to notice a
+    // dead feed quickly. The keepalive bounds the worst case; it is not a
+    // fast detector.
+    NoteDepthActivity();
+
     // KEY: only the documented MAINTENANCE RESET counts - seqId jumps
     // backwards while prevSeqId still chains (prevSeqId=15, seqId=3). It is
     // not a gap (CheckOkxContinuity below treats it as kApply), but it does
@@ -88,6 +101,13 @@ void OKXProvider::OnBboMessage(const std::string& message, uint32_t conn_index) 
     if (!update) {
         return;  // not a bbo-tbt payload (e.g. subscribe ack, pong)
     }
+
+    // Whether bbo-tbt has its own keepalive is NOT documented as far as we
+    // have checked, unlike the books channel above. So this stamp records
+    // real data only, and until that is verified against a live capture the
+    // BBO stream's liveness must lean on connection state and cross-venue
+    // comparison rather than on a timer.
+    NoteBboActivity();
 
     // Separate filter from the depth stream: bbo-tbt and books carry
     // independent seqId sequences, so a shared high-water mark would silently

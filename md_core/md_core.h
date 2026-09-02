@@ -5,6 +5,7 @@
 #include "consolidated_bbo.h"
 #include "consolidated_book.h"
 #include "types.h"
+#include "venue_health.h"
 #include "logger/logger.h"
 #include <functional>
 #include <memory>
@@ -56,6 +57,24 @@ class Core {
     // mutually sequenced, so mixing them corrupts the book (§7).
     void ApplyQuote(const BboQuote& quote);
 
+    // A venue's staleness verdict changed (DESIGN_1 §6.5). Pushed by the
+    // provider that owns that venue, on that provider's thread, in the same
+    // call sequence as its ApplyUpdate/ApplyQuote calls - so the event is
+    // ordered against that venue's own data, which is what makes acting on
+    // it safe. When the SPSC queues land this becomes a queue message and the
+    // ordering is preserved rather than created.
+    //
+    // Edge-triggered: only changes arrive, so this is called a handful of
+    // times in a healthy run, not per tick.
+    //
+    // KEY: Core may only make a pushed verdict WORSE, never better. The
+    // provider can see things Core cannot - its own sockets - so a venue it
+    // reports as kDisconnected is disconnected, full stop. Cross-venue
+    // corroboration (§6.2b signal 3, not built) will layer on top of this by
+    // demoting a kLive venue that is silent while its peers are busy; it will
+    // never promote one.
+    void OnVenueHealth(const VenueHealthEvent& event);
+
     void Start() {}
     void Stop() {}
 
@@ -75,6 +94,39 @@ class Core {
     // costs contention the real design wouldn't have; remove it once the
     // SPSC queue replaces this.
     std::mutex apply_mutex_;
+
+    // Latest verdict per venue, one array per stream because depth and
+    // fast-BBO are separate sockets and fail independently (§6.2d).
+    //
+    // KEY: initialized to kNoData, not kLive - fail-safe. Nothing is admitted
+    // to the merge until a provider has affirmatively said its feed is alive.
+    // The cost of being wrong in this direction is one publish with a thinner
+    // book; the cost of the other direction is publishing prices from a venue
+    // we have never heard from. The provider promotes a stream out of kNoData
+    // on its very first message, so this costs no startup delay.
+    //
+    // Guarded by apply_mutex_ like the books: OnVenueHealth arrives on a
+    // provider thread and ApplyUpdate reads these on another.
+    VenueHealthArray depth_health_{};
+    VenueHealthArray bbo_health_{};
+
+    // Bumped whenever a BBO-stream verdict changes. Compared against the
+    // per-instrument value below to decide whether the next quote can be
+    // folded in incrementally or needs a full rescan.
+    //
+    // KEY: the merged Book needs no equivalent, because MergeBooks rebuilds
+    // from scratch every pass - change the admission rule and the next output
+    // is already correct. The BBO is different: UpdateBBOWithQuote maintains
+    // PERSISTENT state, so a stale venue's price is already inside
+    // consolidated_bbo_, and the venue sends nothing more to displace it.
+    // Skipping its future quotes cannot remove a price that is already there.
+    //
+    // A version counter rather than a flag because health is per VENUE while
+    // the BBO is per INSTRUMENT: one venue going stale invalidates every
+    // instrument's BBO, and a counter says so without iterating them.
+    uint64_t bbo_health_version_ = 0;
+    std::unordered_map<InstrumentId, uint64_t> bbo_health_version_seen_;
+
     BboCallback bbo_callback_;
     BookCallback book_callback_;
     InstrumentBooks venue_books_;

@@ -4,6 +4,7 @@
 
 #include "types.h"
 #include "venue_book.h"
+#include "venue_health.h"
 
 namespace market_data {
 namespace consolidated {
@@ -52,7 +53,18 @@ BBO ComputeBBO(const VenueBookArray& books);
 // rescan fallback inside UpdateBBOWithQuote, and as the test oracle the
 // incremental path is checked against - the same role std::map plays for
 // VenueBook (§5.1).
-BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes);
+// `health` excludes venues whose verdict is not kLive, exactly as in
+// MergeBooks; nullptr admits everyone. Same reasoning for the default: a pure
+// function merges what it is handed, and admission is the caller's policy.
+BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes, const VenueHealthArray* health = nullptr);
+
+// Same computation, filling an existing BBO instead of returning a new one.
+//
+// This exists for the health-change rescan. Assigning the by-value version
+// over Core's running BBO would replace the attribution vectors, throwing
+// away the capacity Core::Init reserves so the hot path never allocates
+// (DESIGN_1 §7.5). Filling in place keeps those buffers.
+void ComputeBBOFromQuotesInto(const VenueQuoteArray& quotes, BBO& out, const VenueHealthArray* health = nullptr);
 
 // Incremental: folds one venue's new quote into an existing BBO.
 // O(venues at the best level) - typically 1 - instead of O(venues), falling
@@ -64,7 +76,19 @@ BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes);
 // the quote before calling this, because the rescan path re-reads it from
 // there. Passing a stale array silently produces a wrong book, and only on
 // the rare rescan path, so the bug would hide for a long time.
-void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes);
+//
+// A quote from a venue that is not kLive is treated exactly as a quote with
+// price 0 - "this venue has no bid/ask" - which runs the existing
+// remove-and-rescan branch. Nothing special is needed for it.
+//
+// KEY: filtering here is NOT sufficient on its own. This function maintains
+// PERSISTENT state, so a stale venue's price is already folded into
+// `current`, and a venue that has gone quiet sends nothing more to displace
+// it. Excluding it requires the caller to force a full ComputeBBOFromQuotes
+// rescan when a venue's health CHANGES (DESIGN_1 §6.6). Filtering a stateless
+// recomputation is easy; filtering an incremental one needs the transition.
+void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes,
+                        const VenueHealthArray* health = nullptr);
 
 // TODO: not built yet. Will follow once §8.2/§8.3's band math lands in
 // md_core - ComputeVolumeBands(...), ComputePriceBands(...).

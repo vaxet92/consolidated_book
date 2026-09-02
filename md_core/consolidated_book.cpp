@@ -3,8 +3,22 @@
 namespace market_data {
 namespace consolidated {
 
-void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth) {
+void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const VenueHealthArray* health) {
     out.Clear();  // keeps capacity - no allocation after warm-up
+
+    // Admission is decided once, here, and then read by both sides. Deciding
+    // it per side could let bids and asks disagree about which venues are in,
+    // which would produce a merged book whose two halves come from different
+    // sets of venues - a crossed or inverted book with no single cause to
+    // trace it back to.
+    //
+    // nullptr admits everything: an absent policy is not the same as a policy
+    // that excludes, and a pure merge with no verdict supplied must merge
+    // what it was given.
+    std::array<bool, kVenueCount> admitted{};
+    for (size_t i = 0; i < kVenueCount; ++i) {
+        admitted[i] = (health == nullptr) || IsAdmissible((*health)[i]);
+    }
 
     // --- bids: highest price first ---
     {
@@ -14,7 +28,10 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth) {
         std::array<BidMap::const_iterator, kVenueCount> end{};
         std::array<bool, kVenueCount> active{};
         for (size_t i = 0; i < kVenueCount; ++i) {
-            if (books[i]) {
+            // A venue that is not admitted is simply never made active, so
+            // the k-way merge below never looks at it. No branch is added to
+            // the inner loop - the exclusion costs nothing per level.
+            if (books[i] && admitted[i]) {
                 it[i] = books[i]->bids().begin();
                 end[i] = books[i]->bids().end();
                 active[i] = it[i] != end[i];
@@ -68,7 +85,7 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth) {
         std::array<AskMap::const_iterator, kVenueCount> end{};
         std::array<bool, kVenueCount> active{};
         for (size_t i = 0; i < kVenueCount; ++i) {
-            if (books[i]) {
+            if (books[i] && admitted[i]) {
                 it[i] = books[i]->asks().begin();
                 end[i] = books[i]->asks().end();
                 active[i] = it[i] != end[i];

@@ -60,9 +60,51 @@ void Core::ApplyUpdate(const BookUpdate& update) {
     // job (§8.4).
     if (book_callback_) {
         std::shared_ptr<consolidated::Book> merged = AcquireBookBuffer(update.instrument);
-        consolidated::MergeBooks(venue_it->second, *merged);
+        // The staleness verdict finally takes effect here. Passing
+        // &depth_health_ rather than nullptr is the single line that turns
+        // the whole policy from inert into live: a venue whose verdict is not
+        // kLive stops contributing levels, attribution and depth.
+        //
+        // depth_health_, not bbo_health_ - this is the depth book, and the
+        // two streams are separate sockets that fail independently (§6.2d).
+        consolidated::MergeBooks(venue_it->second, *merged, consolidated::kDefaultMaxDepth, &depth_health_);
         book_callback_(update.instrument, merged);
     }
+}
+
+void Core::OnVenueHealth(const VenueHealthEvent& event) {
+    // Same lock as the book path: this writes state ApplyUpdate reads, and
+    // arrives on a different provider's thread. Cheap because the event is
+    // edge-triggered - a handful of calls in a healthy run, not per tick.
+    std::lock_guard<std::mutex> lock(apply_mutex_);
+
+    const size_t index = static_cast<size_t>(event.venue);
+    if (index >= kVenueCount) {
+        return;  // unknown venue - nothing sensible to record
+    }
+
+    VenueHealthArray& target = (event.stream == StreamKind::kDepth) ? depth_health_ : bbo_health_;
+    if (target[index] == event.health) {
+        return;  // provider is edge-triggered already, but do not depend on it
+    }
+    target[index] = event.health;
+
+    // Only the BBO needs invalidating. The merged Book is rebuilt from
+    // scratch on every update, so it picks the new verdict up for free.
+    if (event.stream == StreamKind::kBbo) {
+        ++bbo_health_version_;
+    }
+
+    // Deliberately does NOT republish. A health change alters what the NEXT
+    // merge produces, and the next update is normally milliseconds away. The
+    // one case that argument fails is a venue going stale in a quiet market,
+    // where "the next update" may never come - the client then keeps a book
+    // that still includes the venue we just excluded.
+    //
+    // TODO: publish on a health change once the total-outage path is settled.
+    // Left out here because republishing needs an instrument, and this event
+    // is per VENUE - Core would have to fan it out across every instrument,
+    // which is the right design only after multi-symbol is real (§16.1).
 }
 
 std::shared_ptr<consolidated::Book> Core::AcquireBookBuffer(InstrumentId instrument) {
@@ -98,7 +140,24 @@ void Core::ApplyQuote(const BboQuote& quote) {
     quotes_it->second[static_cast<size_t>(quote.venue)] = quote;
 
     consolidated::BBO& bbo = consolidated_bbo_[quote.instrument];
-    consolidated::UpdateBBOWithQuote(bbo, quote, quotes_it->second);
+
+    // KEY: a health change forces a FULL rescan, it is not merely filtered
+    // forward. UpdateBBOWithQuote carries persistent state, so a venue that
+    // has gone stale still has its price sitting inside `bbo` - and having
+    // gone quiet, it will never send another quote to displace it. Only a
+    // rescan of the whole quote array can remove it.
+    //
+    // Rare by construction: bbo_health_version_ moves a handful of times in a
+    // healthy run, so the O(venues) rescan is not on the hot path.
+    uint64_t& seen = bbo_health_version_seen_[quote.instrument];
+    if (seen != bbo_health_version_) {
+        // The new quote is already in `quotes` (stored above), so the rescan
+        // includes it - there is nothing left to fold in afterwards.
+        consolidated::ComputeBBOFromQuotesInto(quotes_it->second, bbo, &bbo_health_);
+        seen = bbo_health_version_;
+    } else {
+        consolidated::UpdateBBOWithQuote(bbo, quote, quotes_it->second, &bbo_health_);
+    }
 
     if (bbo_callback_) {
         bbo_callback_(quote.instrument, bbo);

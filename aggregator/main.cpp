@@ -123,6 +123,10 @@ int main(int argc, char* argv[]) {
             // others - but no venue's limits have been verified, so three
             // unverified numbers would be guessing where one is defensible.
             .connections = server_config.connections,
+            // Binance publishes no keepalive on either stream, so these are
+            // placeholders, not derived values - see types/venue.h.
+            .depth_backstop_ns = staleness::kBinanceDepthBackstopNs,
+            .bbo_backstop_ns = staleness::kBinanceBboBackstopNs,
         };
         providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update, on_quote));
     }
@@ -135,6 +139,10 @@ int main(int argc, char* argv[]) {
             .port = std::string(kBybitPort),
             .depth = ResolveDepth(VenueId::BYBIT, server_config.depth),
             .connections = server_config.connections,
+            .depth_backstop_ns = staleness::kBybitDepthBackstopNs,
+            // The only tight, derived backstop we have: Bybit republishes L1
+            // with the same `u` every 3s of no change.
+            .bbo_backstop_ns = staleness::kBybitBboBackstopNs,
         };
         providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update, on_quote));
     }
@@ -147,8 +155,24 @@ int main(int argc, char* argv[]) {
             .port = std::string(kOkxPort),
             .depth = ResolveDepth(VenueId::OKX, server_config.depth),
             .connections = server_config.connections,
+            // Derived from OKX's ~60s seqId == prevSeqId keepalive.
+            .depth_backstop_ns = staleness::kOkxDepthBackstopNs,
+            .bbo_backstop_ns = staleness::kOkxBboBackstopNs,
         };
         providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update, on_quote));
+    }
+
+    // The health seam (DESIGN_1 §6.5). Each provider decides the verdict for
+    // its own two streams and pushes it here; Core stores it and the next
+    // merge honours it. Set before Start(), because the watchdog arms as soon
+    // as the provider's io_context runs.
+    //
+    // Same shape as on_update/on_quote above: main.cpp is the only place that
+    // knows about both sides, which is what keeps Core free of any knowledge
+    // of providers, sockets or threads.
+    auto on_health = [&core](const VenueHealthEvent& event) { core.OnVenueHealth(event); };
+    for (auto& provider : providers) {
+        provider->SetHealthCallback(on_health);
     }
 
     for (auto& provider : providers) {
