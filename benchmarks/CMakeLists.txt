@@ -16,3 +16,20 @@ target_include_directories(bench_binance_parser PRIVATE ${CMAKE_SOURCE_DIR})
 target_link_libraries(bench_binance_parser PRIVATE
     md_provider
 )
+
+# Order book hot path: per-venue apply, the k-way merge, and the BBO. These
+# are the before-numbers the flat-vector book (DESIGN_1 14.2 step 16) and the
+# incremental merge (step 16b) have to be justified against.
+#
+# Links md_core only - no provider, no networking. The whole point of md_core
+# having no I/O is that its cost can be measured without one.
+add_executable(bench_md_core
+    bench_md_core.cpp
+    latency_benchmark.h
+)
+
+target_include_directories(bench_md_core PRIVATE ${CMAKE_SOURCE_DIR})
+
+target_link_libraries(bench_md_core PRIVATE
+    md_core
+)

@@ -392,6 +392,26 @@ Consequence: **there is no lock anywhere on the book path.** No mutex, no seqloc
 
 - Delta apply costs roughly 1–3 µs (about 5 binary searches plus small memmoves in a few-hundred-level vector).
 - The consolidator does this for three venues, so one core saturates near **150k updates/sec**.
+
+> **MEASURED** (`bench_md_core`, Apple M4 Pro, Release, 5000 iterations, 1000-level books; medians):
+>
+> | operation | measured | the estimate above |
+> |---|---|---|
+> | delta apply, 100 levels | **333 ns** | 1–3 µs — **too pessimistic by ~5–10×** |
+> | merge, 1000 output levels | **8.25 µs** | — |
+> | merge, 400 output levels | **3.79 µs** | — |
+> | merge, 50 output levels | **375 ns** | — |
+> | tree traversal alone | **9.04 µs** | — |
+> | BBO incremental | **< 42 ns** (below clock resolution) | — |
+> | BBO full scan | **83 ns** | — |
+>
+> Saturation is `1 / 8.25 µs ≈ **120k merges/sec**` on one core — close to the 150k estimate, slightly optimistic.
+>
+> **The finding that matters:** *tree traversal alone* (`++it` across the three maps, no merge logic, no tie handling, no prefix sums) costs **as much as the entire merge**. So essentially 100% of `MergeBooks` is the cost of walking `std::map`; the merge's own arithmetic is in the noise. Merge cost is linear in output depth at ~4.3 ns per level.
+>
+> **And the decision that follows:** at the observed rate — a live probe measured Binance depth at ~9 messages/sec, so roughly 30 merges/sec across three venues — the merge consumes **0.026% of one core**. The flat-vector book would make it several times faster and it would not matter. Not built, deliberately (§14.2 step 16).
+>
+> The ~200 ns queue hop below remains **unmeasured**; the SPSC queues do not exist yet.
 - The public throttled channels deliver about **60 updates/sec** combined.
 - End-to-end latency is dominated by Binance's own 100ms grouping — five orders of magnitude larger than the ~200ns queue hop this would remove.
 

@@ -413,32 +413,56 @@ Then stop. Let them pick the thread.
 
 ## 7. Performance — be careful here
 
-**What is actually measured:**
+**What is measured** (`bench_md_core`, Apple M4 Pro, Release, medians):
 
-- **Clock read cost.** `steady_clock::now()` at about 14 ns, `system_clock` at
-  about 13 ns, against a 0.22 ns empty-loop baseline. Twenty million
-  iterations, `-O2`, Apple M4 Pro. This is why the second timestamp per
-  message was not worth avoiding.
-- **A Binance parser benchmark** exists under `-DBUILD_BENCHMARKS=ON`.
+| operation | cost |
+|---|---|
+| delta apply, 100 levels | 333 ns (was 792 ns before the hint work) |
+| merge, 1000 output levels | 8.25 µs |
+| merge, 400 / 50 levels | 3.79 µs / 375 ns |
+| **tree traversal alone** | **9.04 µs** |
+| BBO incremental | < 42 ns (below clock resolution) |
+| BBO full scan | 83 ns |
+| `steady_clock::now()` | ~14 ns |
 
-**What is NOT measured — say so plainly if asked:**
+**Still not measured:** the ~200 ns queue hop in `DESIGN.md §7.2` — the SPSC
+queues do not exist.
 
-- Delta apply cost, consolidator saturation point, and queue hop latency.
-  `DESIGN.md §7.2` quotes figures for all three. **None of them are measured by
-  anything in the repo.** If asked "how did you get 1–3 µs?", the honest answer
-  is that it is an estimate carried over from the design document and not yet
-  verified.
-- Whether `std::map` is actually the bottleneck in the per-venue book. This is
-  the open question, and it is why the flat-vector rewrite has not been done —
-  there is no before-number to justify it.
+**Q: Is `std::map` the bottleneck?**
 
-**Q: What would you optimise first?**
+> For the merge, it is essentially the *whole* cost. Walking the three maps with
+> no merge logic at all — no selection, no tie handling, no prefix sums — costs
+> 9.04 µs against 8.25 µs for the complete merge. So the merge's arithmetic is
+> in the noise and what I am paying for is pointer-chasing through red-black
+> tree nodes. Cost is linear in output depth, about 4.3 ns per level.
 
-> Nothing, until I have measured. The parser was the obvious target and it is
-> already the one thing that was optimised — the `simdjson` on-demand parser is
-> now constructed once per provider instead of once per message. The next step
-> is benchmarking `ApplyUpdate` and `MergeBooks`, because that is what decides
-> whether replacing `std::map` is worth doing at all.
+**Q: So you replaced it with a flat vector?**
+
+> No, and that is the point. I then measured how often it runs. A live probe put
+> Binance's depth stream at about nine messages a second, so roughly thirty
+> merges a second across three venues. Thirty times 8.25 µs is **0.026% of one
+> core**. The flat vector would make it several times faster and it would not
+> matter, so I did not build it and I wrote down the number that says why.
+>
+> If the rate went up a hundredfold — tick-by-tick feeds, or many symbols — the
+> answer changes, and by then I would have the before-number ready.
+
+**Q: What did you optimise, then?**
+
+> Two things, both measured. The `simdjson` on-demand parser is now constructed
+> once per provider instead of once per message. And `VenueBook::ApplyUpdate`
+> chains an insertion hint through `std::map`, taking a 100-level delta from
+> 792 ns to about 330 ns and an erase-heavy one from 3.33 µs to 2.58 µs — with a
+> detour worth describing, in §10.4.
+
+**Q: Is the benchmark trustworthy?**
+
+> It has one bias I state with the results: a tight loop keeps the tree nodes
+> hot in cache, while production leaves milliseconds between merges. So it
+> **understates** `std::map`'s disadvantage — the real gap is at least as wide
+> as measured, probably wider. It also uses production-scale prices, because
+> band accumulation runs in `__int128` precisely to survive that scale and a
+> toy fixture would exercise a different path.
 
 **Q: Isn't rebuilding the whole merged book on every update wasteful?**
 
@@ -585,6 +609,36 @@ Live log: `[BYBIT] depth gap: expected u=42348956, got 42348963`.
 > **The lesson: adding a periodic task to an event loop changes when that loop
 > terminates.** The fix is that the timer does not rearm once every socket is
 > gone — it reports the outage and then gets out of the way.
+
+### 10.4 An optimisation that made things 84% slower
+
+> I added an insertion hint to `std::map` in `VenueBook::ApplyUpdate`, expecting
+> a speedup because the venues send sorted level arrays. A 50-level delta went
+> from 792 ns to **1458 ns** — 84% *worse*.
+>
+> The cause is an off-by-one in the API contract. `insert_or_assign` takes a
+> hint meaning "the position before which the element will be inserted", but
+> returns an iterator pointing **at** the element written. I chained the return
+> value straight back in, so every hint was one position early. libstdc++ then
+> took its "key is after the hint" branch, compared against `hint + 1`, found
+> the keys **equal** rather than ordered, and fell back to a full descent from
+> the root — so I paid the hint validation *and* the search I was trying to
+> avoid.
+>
+> Chaining `std::next` instead put the hint exactly on the key being written.
+> That gave 2× on quantity updates, and applying the same idea to the erase
+> path — check whether the chained hint already points at the level to remove
+> before searching for it — gave another 22% on erase-heavy deltas.
+>
+> **The lesson: a wrong hint is not an error.** It degrades silently to a full
+> search, so the failure mode of getting it wrong is "mysteriously slower", not
+> a compile error or a crash. Without a benchmark I would have shipped a
+> pessimisation believing it was an optimisation.
+>
+> The coda is the part I would want you to hear: I then multiplied by the
+> message rate and found `ApplyUpdate` was already **0.0016% of a core**. The
+> work was correct and measured, and it did not matter. I kept it because it was
+> free and tested, and stopped there.
 
 If asked "what was the hardest bug?", 10.1 is the answer: it only appeared
 under live multi-connection load, the symptom pointed at the wrong subsystem,

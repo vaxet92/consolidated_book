@@ -1,6 +1,7 @@
 # Build directories
 build/
 build-debug/
+build-bench/
 cmake-build-*/
 out/
 
