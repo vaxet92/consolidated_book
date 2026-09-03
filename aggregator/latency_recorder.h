@@ -4,11 +4,13 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <string>
 #include <vector>
 
 #include "logger/logger.h"
 #include "types/venue.h"
+#include "types/venue_registry.h"
 
 namespace market_data {
 
@@ -60,8 +62,8 @@ class LatencyRecorder {
     //
     // Peak, not average: what matters is how big the tree GOT, since that is
     // what decides whether it still fits in cache.
-    void Record(int64_t source_mono_ns, const std::array<uint32_t, kVenueCount>& venue_levels) {
-        for (size_t i = 0; i < kVenueCount; ++i) {
+    void Record(int64_t source_mono_ns, const std::array<uint32_t, kMaxVenues>& venue_levels) {
+        for (size_t i = 0; i < kMaxVenues; ++i) {
             peak_levels_[i] = std::max(peak_levels_[i], venue_levels[i]);
         }
         Record(source_mono_ns);
@@ -111,14 +113,31 @@ class LatencyRecorder {
             sum += sample;
         }
 
+        // Reported by SLOT, not by venue name.
+        //
+        // KEY: this used to print peak_levels_[VenueId::BINANCE] under the
+        // label "binance". Slots are assigned in registration order and no
+        // longer track the enum (DESIGN.md §17.6), so that label was about to
+        // start naming the wrong exchange - a diagnostic that lies is worse
+        // than one that is terse. Resolving slot -> name here would mean
+        // handing the recorder a registry for a log line; printing the slot
+        // is honest and the operator can match it against the "venue 'X'
+        // registered in slot N" line at startup.
+        //
+        // Only non-empty slots are listed, so the line stays short when three
+        // of eight are in use.
+        std::string peaks;
+        for (size_t i = 0; i < kMaxVenues; ++i) {
+            if (peak_levels_[i] != 0) {
+                fmt::format_to(std::back_inserter(peaks), "{}slot{}={}", peaks.empty() ? "" : " ", i, peak_levels_[i]);
+            }
+        }
+
         Logger::Log(LogLevel::kInfo,
                     "[latency] {} n={} min={:.1f}us median={:.1f}us p99={:.1f}us max={:.1f}us mean={:.1f}us "
-                    "peak_levels[binance={} bybit={} okx={}] (unstamped={} negative={})",
+                    "peak_levels[{}] (unstamped={} negative={})",
                     name_, n, min / 1000.0, median / 1000.0, p99 / 1000.0, max / 1000.0,
-                    static_cast<double>(sum) / static_cast<double>(n) / 1000.0,
-                    peak_levels_[static_cast<size_t>(VenueId::BINANCE)],
-                    peak_levels_[static_cast<size_t>(VenueId::BYBIT)],
-                    peak_levels_[static_cast<size_t>(VenueId::OKX)], unstamped_, negative_);
+                    static_cast<double>(sum) / static_cast<double>(n) / 1000.0, peaks, unstamped_, negative_);
 
         samples_.clear();
     }
@@ -141,7 +160,7 @@ class LatencyRecorder {
     // Deliberately NOT reset in Report(). This is a running high-water mark
     // across the whole process, because the question is whether a book grows
     // without bound over time - which a per-window figure would hide.
-    std::array<uint32_t, kVenueCount> peak_levels_{};
+    std::array<uint32_t, kMaxVenues> peak_levels_{};
 };
 
 // Breaks ApplyUpdate's cost into its parts, so the ~140-190us live figure can

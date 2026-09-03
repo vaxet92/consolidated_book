@@ -15,25 +15,26 @@ BBO ComputeBBO(const VenueBookArray& books) {
             continue;  // venue not configured for this instrument
         }
 
-        VenueId venue = static_cast<VenueId>(i);
+        // The loop index IS the slot - no lookup, and no VenueId anywhere.
+        const VenueSlot slot = static_cast<VenueSlot>(i);
 
         if (auto bid = books[i]->BestBid()) {
             auto [price, qty] = *bid;
             if (0 == best_bid.price || price > best_bid.price) {
-                best_bid = ConsolidatedPriceLevel{price, qty, {{venue, qty}}};
+                best_bid = ConsolidatedPriceLevel{price, qty, {{slot, qty}}};
             } else if (price == best_bid.price) {
                 best_bid.total_qty += qty;
-                best_bid.venues.push_back({venue, qty});
+                best_bid.venues.push_back({slot, qty});
             }
         }
 
         if (auto ask = books[i]->BestAsk()) {
             auto [price, qty] = *ask;
             if (0 == best_ask.price || price < best_ask.price) {
-                best_ask = ConsolidatedPriceLevel{price, qty, {{venue, qty}}};
+                best_ask = ConsolidatedPriceLevel{price, qty, {{slot, qty}}};
             } else if (price == best_ask.price) {
                 best_ask.total_qty += qty;
-                best_ask.venues.push_back({venue, qty});
+                best_ask.venues.push_back({slot, qty});
             }
         }
     }
@@ -54,11 +55,11 @@ BBO ComputeBBO(const VenueBookArray& books) {
 // allocates again (DESIGN_1 §7.5 - no allocation on hot paths). Assigning a
 // whole ConsolidatedPriceLevel instead would move-steal the temporary's
 // 1-element buffer and drop the reserved one.
-static void SetSingleVenue(ConsolidatedPriceLevel& level, PriceTicks price, VenueId venue, QtyUnits qty) {
+static void SetSingleVenue(ConsolidatedPriceLevel& level, PriceTicks price, VenueSlot slot, QtyUnits qty) {
     level.price = price;
     level.total_qty = qty;
     level.venues.clear();
-    level.venues.push_back({venue, qty});
+    level.venues.push_back({slot, qty});
 }
 
 // One side's full scan, factored out so ComputeBBOFromQuotes and the rescan
@@ -83,12 +84,14 @@ static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& o
         if (health != nullptr && !IsAdmissible((*health)[i])) {
             continue;
         }
-        VenueId venue = static_cast<VenueId>(i);
+        // The array index IS the slot: ApplyQuote stores each venue's quote
+        // at its own slot, so position and identity are the same thing now.
+        const VenueSlot slot = static_cast<VenueSlot>(i);
         if (out.price == 0 || quote.bid_price > out.price) {
-            SetSingleVenue(out, quote.bid_price, venue, quote.bid_qty);
+            SetSingleVenue(out, quote.bid_price, slot, quote.bid_qty);
         } else if (quote.bid_price == out.price) {
             out.total_qty += quote.bid_qty;
-            out.venues.push_back({venue, quote.bid_qty});
+            out.venues.push_back({slot, quote.bid_qty});
         }
     }
 }
@@ -106,12 +109,13 @@ static void ScanBestAsk(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& o
         if (health != nullptr && !IsAdmissible((*health)[i])) {
             continue;
         }
-        VenueId venue = static_cast<VenueId>(i);
+        // Same as ScanBestBid: the array index is the slot.
+        const VenueSlot slot = static_cast<VenueSlot>(i);
         if (out.price == 0 || quote.ask_price < out.price) {  // asks: lower is better
-            SetSingleVenue(out, quote.ask_price, venue, quote.ask_qty);
+            SetSingleVenue(out, quote.ask_price, slot, quote.ask_qty);
         } else if (quote.ask_price == out.price) {
             out.total_qty += quote.ask_qty;
-            out.venues.push_back({venue, quote.ask_qty});
+            out.venues.push_back({slot, quote.ask_qty});
         }
     }
 }
@@ -122,16 +126,16 @@ static void ScanBestAsk(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& o
 //
 // Takes venue+qty explicitly rather than a quote: a BboQuote has separate
 // bid_qty and ask_qty, and this is called for both sides.
-static void UpdateEqualPrice(ConsolidatedPriceLevel& bbo_level, VenueId venue, QtyUnits qty) {
+static void UpdateEqualPrice(ConsolidatedPriceLevel& bbo_level, VenueSlot slot, QtyUnits qty) {
     auto exist_it = std::find_if(bbo_level.venues.begin(), bbo_level.venues.end(),
-                                 [venue](const VenueQuote& vq) { return vq.venue == venue; });
+                                 [slot](const VenueQuote& vq) { return vq.slot == slot; });
     if (exist_it != bbo_level.venues.end()) {
         bbo_level.total_qty -= exist_it->qty;
         exist_it->qty = qty;
         bbo_level.total_qty += qty;
     } else {
         bbo_level.total_qty += qty;
-        bbo_level.venues.push_back({venue, qty});
+        bbo_level.venues.push_back({slot, qty});
     }
 }
 
@@ -141,9 +145,9 @@ static void UpdateEqualPrice(ConsolidatedPriceLevel& bbo_level, VenueId venue, Q
 //
 // Returns true if the venue was present, so the caller can detect the level
 // losing its last venue and trigger a rescan.
-static bool UpdateWorstPrice(ConsolidatedPriceLevel& bbo_level, VenueId venue) {
+static bool UpdateWorstPrice(ConsolidatedPriceLevel& bbo_level, VenueSlot slot) {
     auto exist_it = std::find_if(bbo_level.venues.begin(), bbo_level.venues.end(),
-                                 [venue](const VenueQuote& vq) { return vq.venue == venue; });
+                                 [slot](const VenueQuote& vq) { return vq.slot == slot; });
     if (exist_it == bbo_level.venues.end()) {
         return false;
     }
@@ -171,7 +175,7 @@ BBO ComputeBBOFromQuotes(const VenueQuoteArray& quotes, const VenueHealthArray* 
     return result;
 }
 
-void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes,
+void UpdateBBOWithQuote(BBO& current, const BboQuote& update, VenueSlot slot, const VenueQuoteArray& quotes,
                         const VenueHealthArray* health) {
     // A quote from a venue that is not admitted is folded in as though it
     // carried no prices at all. That is not a shortcut: "this venue has no
@@ -179,9 +183,14 @@ void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteAr
     // consolidated top of book, and the price == 0 branches below already
     // remove the venue from the best level and rescan if it was the last one
     // there. Adding a separate exclusion path would duplicate that logic.
-    const size_t venue_index = static_cast<size_t>(update.venue);
+    //
+    // Indexed by SLOT, not by VenueId - `health` is a per-slot array, and the
+    // two are the same number only while venues register in enum order. The
+    // bound is kMaxVenues for the same reason: it is the size of the array
+    // actually being indexed.
+    const size_t venue_index = VenueSlotIndex(slot);
     const bool admitted =
-        health == nullptr || venue_index >= kVenueCount || IsAdmissible((*health)[venue_index]);
+        health == nullptr || venue_index >= kMaxVenues || IsAdmissible((*health)[venue_index]);
     const PriceTicks bid_price = admitted ? update.bid_price : 0;
     const PriceTicks ask_price = admitted ? update.ask_price : 0;
 
@@ -189,18 +198,18 @@ void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteAr
     ConsolidatedPriceLevel& best_bid = current.best_bid;
     if (bid_price == 0) {
         // Venue has no bid at all. If it was holding the best level, it left.
-        if (UpdateWorstPrice(best_bid, update.venue) && best_bid.venues.empty()) {
+        if (UpdateWorstPrice(best_bid, slot) && best_bid.venues.empty()) {
             ScanBestBid(quotes, best_bid, health);
         }
     } else if (best_bid.price == 0 || bid_price > best_bid.price) {
         // Strictly better (or first data): this venue alone owns the level.
-        SetSingleVenue(best_bid, bid_price, update.venue, update.bid_qty);
+        SetSingleVenue(best_bid, bid_price, slot, update.bid_qty);
     } else if (bid_price == best_bid.price) {
-        UpdateEqualPrice(best_bid, update.venue, update.bid_qty);
+        UpdateEqualPrice(best_bid, slot, update.bid_qty);
     } else {
         // Worse than the best. Only matters if this venue WAS holding the
         // best level and has now moved off it.
-        if (UpdateWorstPrice(best_bid, update.venue) && best_bid.venues.empty()) {
+        if (UpdateWorstPrice(best_bid, slot) && best_bid.venues.empty()) {
             // The best level lost its last venue. The new best is not
             // recoverable from `current` alone - it only ever kept the top
             // level - so rescan the per-venue array.
@@ -211,15 +220,15 @@ void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteAr
     // ---- ask side: better means LOWER ----
     ConsolidatedPriceLevel& best_ask = current.best_ask;
     if (ask_price == 0) {
-        if (UpdateWorstPrice(best_ask, update.venue) && best_ask.venues.empty()) {
+        if (UpdateWorstPrice(best_ask, slot) && best_ask.venues.empty()) {
             ScanBestAsk(quotes, best_ask, health);
         }
     } else if (best_ask.price == 0 || ask_price < best_ask.price) {
-        SetSingleVenue(best_ask, ask_price, update.venue, update.ask_qty);
+        SetSingleVenue(best_ask, ask_price, slot, update.ask_qty);
     } else if (ask_price == best_ask.price) {
-        UpdateEqualPrice(best_ask, update.venue, update.ask_qty);
+        UpdateEqualPrice(best_ask, slot, update.ask_qty);
     } else {
-        if (UpdateWorstPrice(best_ask, update.venue) && best_ask.venues.empty()) {
+        if (UpdateWorstPrice(best_ask, slot) && best_ask.venues.empty()) {
             ScanBestAsk(quotes, best_ask, health);
         }
     }

@@ -13,6 +13,8 @@ add_executable(unit_tests
     src/test_seq_dedup.cpp
     src/test_consolidated_book.cpp
     src/test_venue_health.cpp
+    src/test_venue_registry.cpp
+    src/test_core_venue_lifecycle.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE

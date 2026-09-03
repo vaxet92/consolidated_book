@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 #include "types.h"
+#include "types/venue_registry.h"
 
 namespace market_data {
 
@@ -50,9 +51,29 @@ class VenueBook {
     OrderBookType<std::less<PriceTicks>> asks_;     // ascending: begin() = best ask
 };
 
-// One VenueBook per venue, indexed by VenueId. A null entry means that
-// venue isn't configured for this instrument.
-using VenueBookArray = std::array<std::unique_ptr<VenueBook>, kVenueCount>;
+// One VenueBook per venue. A null entry means that venue isn't configured for
+// this instrument.
+//
+// Sized by kMaxVenues (fixed CAPACITY) rather than kVenueCount (compile-time
+// venue LIST) - DESIGN.md §17.6. Sizing by the enum is what makes adding a
+// venue a recompile of md_core, and a recompile means a restart, which gaps
+// every venue and every client at once.
+//
+// KEY: this is a capacity change only, and it is safe precisely because the
+// array holds null-checkable handles. Slots beyond the configured venues are
+// null, which is a state every reader already handles - an unconfigured venue
+// has always been null here. Nothing about indexing or ownership changes.
+//
+// The INDEX is still VenueId today. Migrating it to VenueSlot, and migrating
+// the loop bounds from kVenueCount to the registry's runtime size, are
+// separate later steps - each one changes behaviour, where this does not.
+//
+// Cost: 8 slots instead of 3, so 5 extra null pointers (40 bytes) per
+// instrument. At 10 instruments that is ~400 bytes in total, which is not
+// worth avoiding. It does spread the live entries further apart, which is the
+// kind of cache effect §17.9 warns about; not measurable at this size, but
+// stated rather than skipped.
+using VenueBookArray = std::array<std::unique_ptr<VenueBook>, kMaxVenues>;
 
 class PrintHelper {
    public:

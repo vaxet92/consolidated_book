@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "types/venue.h"
+#include "types/venue_registry.h"
 
 namespace market_data {
 
@@ -136,7 +137,25 @@ constexpr const char* ToString(VenueHealth health) {
 // each venue and hands the result to the merge; the merge does no
 // classification of its own and reads no clock. Keeping admission out of the
 // merge is what lets the merge stay a pure function of its inputs.
-using VenueHealthArray = std::array<VenueHealth, kVenueCount>;
+//
+// Sized by kMaxVenues (fixed CAPACITY) rather than kVenueCount (compile-time
+// venue LIST) - DESIGN.md §17.6, same step as VenueBookArray and
+// VenueQuoteArray. The three must stay the same size: they are indexed
+// identically, so sizing them differently would make one of them the real
+// bound and the agreement silent.
+//
+// KEY: this is the safest of the three capacity changes, and for a reason
+// already designed in. kNoData is enumerator 0, so a value-initialized array
+// (md_core.h's `depth_health_{}` / `bbo_health_{}`) puts every unused slot in
+// kNoData, and IsAdmissible(kNoData) is false. The new slots are therefore
+// excluded from the merge by the SAME fail-safe default that already keeps a
+// venue out until a provider affirms its feed is alive. Nothing is admitted by
+// accident: an unregistered slot and a venue that has never spoken are
+// genuinely the same thing, and the enum already says so.
+//
+// Cost: 5 extra bytes per array (VenueHealth is uint8_t), two arrays in Core.
+// Not per instrument - these are per-stream, not per-book.
+using VenueHealthArray = std::array<VenueHealth, kMaxVenues>;
 
 // Which of a venue's two feeds an event refers to.
 //

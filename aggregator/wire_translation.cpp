@@ -16,7 +16,22 @@ wire::Venue ToWire(VenueId venue) {
     return wire::VENUE_UNSPECIFIED;
 }
 
-wire::ConsolidatedPriceLevel ToWire(const consolidated::ConsolidatedPriceLevel& level) {
+VenueWireTable MakeVenueWireTable(const std::function<std::string_view(VenueSlot)>& venue_name) {
+    VenueWireTable table{};  // VENUE_UNSPECIFIED everywhere by default
+    for (size_t i = 0; i < kMaxVenues; ++i) {
+        const std::string_view name = venue_name(static_cast<VenueSlot>(i));
+        if (name.empty()) {
+            continue;  // nothing registered in this slot
+        }
+        // ToVenueId returns COUNT for a name the enum does not know, and
+        // ToWire maps that to VENUE_UNSPECIFIED - which is the honest answer
+        // until the proto can carry a name (see the header's KNOWN LIMIT).
+        table[i] = ToWire(VenueConverter::ToVenueId(std::string(name)));
+    }
+    return table;
+}
+
+wire::ConsolidatedPriceLevel ToWire(const consolidated::ConsolidatedPriceLevel& level, const VenueWireTable& venues) {
     wire::ConsolidatedPriceLevel wire_level;
     // No casts: PriceTicks/QtyUnits are uint64_t and the proto fields are
     // uint64 too, so these are exact, same-width assignments.
@@ -24,16 +39,16 @@ wire::ConsolidatedPriceLevel ToWire(const consolidated::ConsolidatedPriceLevel& 
     wire_level.set_total_qty(level.total_qty);
     for (const auto& venue_quote : level.venues) {
         wire::VenueQuote* wire_quote = wire_level.add_venues();
-        wire_quote->set_venue(ToWire(venue_quote.venue));
+        wire_quote->set_venue(venues[VenueSlotIndex(venue_quote.slot)]);
         wire_quote->set_qty(venue_quote.qty);
     }
     return wire_level;
 }
 
-wire::Bbo ToWire(const consolidated::BBO& bbo) {
+wire::Bbo ToWire(const consolidated::BBO& bbo, const VenueWireTable& venues) {
     wire::Bbo wire_bbo;
-    *wire_bbo.mutable_best_bid() = ToWire(bbo.best_bid);
-    *wire_bbo.mutable_best_ask() = ToWire(bbo.best_ask);
+    *wire_bbo.mutable_best_bid() = ToWire(bbo.best_bid, venues);
+    *wire_bbo.mutable_best_ask() = ToWire(bbo.best_ask, venues);
     wire_bbo.set_crossed(bbo.crossed);
     return wire_bbo;
 }

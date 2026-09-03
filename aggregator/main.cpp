@@ -110,9 +110,41 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    // Core must be told the SAME set. A venue enabled here but never fed
-    // contributes nothing to the merge, so the output stays correct - but the
-    // two lists disagreeing is the kind of thing that silently costs a venue.
+    // Venue registration - the in-process stand-in for the kHello handshake
+    // (DESIGN.md §17.4). Core registers no venues from config: a venue exists
+    // because a provider exists, so the wiring layer that creates the
+    // providers is what tells Core about them.
+    //
+    // KEY: this must run BEFORE Init(). AddInstrument creates a VenueBook for
+    // each venue active AT THAT MOMENT, so registering afterwards would leave
+    // BTCUSDT with an all-null book array and every update rejected as
+    // "unconfigured venue" - silently, with the process otherwise healthy.
+    //
+    // Order matters: Core still indexes by VenueId while only the loop bounds
+    // have migrated, so slot N must equal VenueId N. enabled_venues is built
+    // in enum order above, and RegisterVenue refuses if that ever stops
+    // holding rather than misattributing one venue's prices to another.
+    for (VenueId venue : enabled_venues) {
+        const std::string venue_name = VenueConverter::ToVenueString(venue);
+        if (!core.RegisterVenue(venue_name).has_value()) {
+            Logger::Log(LogLevel::kError, "[Aggregator] failed to register venue {} - refusing to start", venue_name);
+            return 2;
+        }
+    }
+
+    // md_core attributes every level by SLOT and knows no venue names
+    // (DESIGN.md §17.6). This table is what turns a slot back into a venue on
+    // the wire, and it is built once here - after every registration above,
+    // before the server starts - rather than per level.
+    //
+    // KEY: forgetting this call does not crash and does not drop data. Every
+    // level would publish VENUE_UNSPECIFIED, which is a quiet loss of
+    // attribution rather than a loud failure. The default is deliberately
+    // UNSPECIFIED rather than a real venue, so the failure mode is "no
+    // attribution" and never "wrong exchange".
+    service.SetVenueWireTable(
+        MakeVenueWireTable([&core](VenueSlot slot) { return core.VenueName(slot); }));
+
     CoreConfig config = {
         .venues = enabled_venues,
         .default_instruments = {InstrumentId::BTCUSDT},

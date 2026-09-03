@@ -7,6 +7,10 @@ using namespace market_data::consolidated;
 
 namespace {
 
+// These fixtures fill the book array by index, so slot == VenueId here.
+// Named once rather than cast at each assertion (DESIGN.md §17.6).
+constexpr VenueSlot SlotOf(VenueId venue) { return static_cast<VenueSlot>(static_cast<size_t>(venue)); }
+
 void SetBook(VenueBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
     BookUpdate update{venue, InstrumentId::BTCUSDT, bids.size(), true, 1};
     update.bids = std::move(bids);
@@ -30,7 +34,7 @@ TEST(ConsolidatedBookTest, EmptyVenuesProduceEmptyBook) {
     VenueBookArray books{};
     Book merged;
 
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     EXPECT_TRUE(merged.bids.empty());
     EXPECT_TRUE(merged.asks.empty());
@@ -41,7 +45,7 @@ TEST(ConsolidatedBookTest, SingleVenueIsCopiedWithPrefixSums) {
     SetBook(books, VenueId::BINANCE, {{100, 5}, {99, 3}}, {{101, 2}});
     Book merged;
 
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     ASSERT_EQ(merged.bids.size(), 2u);
     EXPECT_EQ(merged.bids[0].price, 100u);
@@ -64,7 +68,7 @@ TEST(ConsolidatedBookTest, DisjointPricesInterleaveInSortedOrder) {
     SetBook(books, VenueId::OKX, {{99, 1}, {97, 1}}, {{106, 1}, {108, 1}});
     Book merged;
 
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     ASSERT_EQ(merged.bids.size(), 4u);
     EXPECT_EQ(merged.bids[0].price, 100u);
@@ -88,7 +92,7 @@ TEST(ConsolidatedBookTest, SamePriceAcrossVenuesMergesWithAttribution) {
     SetBook(books, VenueId::BYBIT, {{100, 2}}, {});
     Book merged;
 
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     ASSERT_EQ(merged.bids.size(), 1u) << "one price, one level";
     const MergedLevel& level = merged.bids[0];
@@ -97,11 +101,11 @@ TEST(ConsolidatedBookTest, SamePriceAcrossVenuesMergesWithAttribution) {
     ASSERT_EQ(level.venue_count, 3);
 
     // Attribution is written in venue-index order by the merge.
-    EXPECT_EQ(level.venues[0].venue, VenueId::BINANCE);
+    EXPECT_EQ(level.venues[0].slot, SlotOf(VenueId::BINANCE));
     EXPECT_EQ(level.venues[0].qty, 5u);
-    EXPECT_EQ(level.venues[1].venue, VenueId::BYBIT);
+    EXPECT_EQ(level.venues[1].slot, SlotOf(VenueId::BYBIT));
     EXPECT_EQ(level.venues[1].qty, 2u);
-    EXPECT_EQ(level.venues[2].venue, VenueId::OKX);
+    EXPECT_EQ(level.venues[2].slot, SlotOf(VenueId::OKX));
     EXPECT_EQ(level.venues[2].qty, 3u);
 }
 
@@ -111,7 +115,7 @@ TEST(ConsolidatedBookTest, PartiallyOverlappingPricesMergeCorrectly) {
     SetBook(books, VenueId::OKX, {{100, 3}, {99, 4}}, {});
     Book merged;
 
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     ASSERT_EQ(merged.bids.size(), 3u);
     EXPECT_EQ(merged.bids[0].price, 100u);
@@ -129,7 +133,7 @@ TEST(ConsolidatedBookTest, MaxDepthTruncatesBothSides) {
     SetBook(books, VenueId::BINANCE, {{100, 1}, {99, 1}, {98, 1}, {97, 1}}, {{101, 1}, {102, 1}, {103, 1}, {104, 1}});
     Book merged;
 
-    MergeBooks(books, merged, /*max_depth=*/2);
+    MergeBooks(books, kVenueCount, merged, /*max_depth=*/2);
 
     EXPECT_EQ(merged.bids.size(), 2u);
     EXPECT_EQ(merged.asks.size(), 2u);
@@ -144,7 +148,7 @@ TEST(ConsolidatedBookTest, LevelQtyRecoversPerLevelQuantity) {
     SetBook(books, VenueId::BINANCE, {{100, 5}, {99, 3}, {98, 7}}, {});
     Book merged;
 
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     ASSERT_EQ(merged.bids.size(), 3u);
     EXPECT_EQ(LevelQty(merged.bids, 0), 5u) << "index 0 is the base case";
@@ -159,12 +163,12 @@ TEST(ConsolidatedBookTest, ReusedBookHasNoStaleLevels) {
 
     VenueBookArray first{};
     SetBook(first, VenueId::BINANCE, {{100, 1}, {99, 1}, {98, 1}}, {{101, 1}});
-    MergeBooks(first, merged);
+    MergeBooks(first, kVenueCount, merged);
     ASSERT_EQ(merged.bids.size(), 3u);
 
     VenueBookArray second{};
     SetBook(second, VenueId::OKX, {{200, 9}}, {});
-    MergeBooks(second, merged);
+    MergeBooks(second, kVenueCount, merged);
 
     ASSERT_EQ(merged.bids.size(), 1u) << "levels from the first merge must be gone";
     EXPECT_EQ(merged.bids[0].price, 200u);
@@ -193,7 +197,7 @@ Book MakeBandBook() {
     VenueBookArray books{};
     SetBook(books, VenueId::BINANCE, {}, {{Px(100), Qty(5)}, {Px(101), Qty(10)}, {Px(102), Qty(20)}});
     Book merged;
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
     return merged;
 }
 
@@ -293,7 +297,7 @@ TEST(ConsolidatedBookTest, FillToBpsBidSideWalksDown) {
     VenueBookArray books{};
     SetBook(books, VenueId::BINANCE, {{Px(100), Qty(5)}, {Px(99), Qty(10)}, {Px(98), Qty(20)}}, {});
     Book merged;
-    MergeBooks(books, merged);
+    MergeBooks(books, kVenueCount, merged);
 
     auto fill = FillToBps(merged.bids, 100, /*is_bid=*/true);
 
@@ -389,7 +393,7 @@ TEST(ConsolidatedBookTest, NullHealthAdmitsEveryVenue) {
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 1}});
     Book merged;
 
-    MergeBooks(books, merged, kDefaultMaxDepth, nullptr);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, nullptr);
 
     ASSERT_EQ(merged.bids.size(), 2u);
     EXPECT_EQ(merged.bids[0].price, 100u);
@@ -403,7 +407,7 @@ TEST(ConsolidatedBookTest, StaleVenueContributesNoLevels) {
     Book merged;
 
     const auto health = Health(kStale, kLive, kLive);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     ASSERT_EQ(merged.bids.size(), 1u);
     EXPECT_EQ(merged.bids[0].price, 99u);
@@ -426,14 +430,14 @@ TEST(ConsolidatedBookTest, FrozenVenueNoLongerWinsTheBestBid) {
     Book merged;
 
     // Admitting the frozen venue: it takes the best bid, and the book crosses.
-    MergeBooks(books, merged, kDefaultMaxDepth, nullptr);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, nullptr);
     EXPECT_EQ(merged.bids[0].price, 50000u);
     EXPECT_EQ(merged.asks[0].price, 49910u);
     EXPECT_GT(merged.bids[0].price, merged.asks[0].price) << "expected the frozen venue to cross the book";
 
     // Excluding it: both sides come from live venues, and the cross is gone.
     const auto health = Health(kStale, kLive, kLive);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     ASSERT_FALSE(merged.bids.empty());
     ASSERT_FALSE(merged.asks.empty());
@@ -453,7 +457,7 @@ TEST(ConsolidatedBookTest, NoDataVenueIsExcludedToo) {
     Book merged;
 
     const auto health = Health(kNoData, kLive, kLive);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     ASSERT_EQ(merged.bids.size(), 1u);
     EXPECT_EQ(merged.bids[0].price, 99u);
@@ -469,7 +473,7 @@ TEST(ConsolidatedBookTest, AllVenuesStaleProducesEmptyBook) {
     Book merged;
 
     const auto health = Health(kStale, kStale, kStale);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     EXPECT_TRUE(merged.bids.empty());
     EXPECT_TRUE(merged.asks.empty());
@@ -485,11 +489,11 @@ TEST(ConsolidatedBookTest, ExcludedVenueDisappearsFromAttribution) {
     Book merged;
 
     const auto health = Health(kStale, kLive, kLive);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     ASSERT_EQ(merged.bids.size(), 1u);
     EXPECT_EQ(merged.bids[0].venue_count, 1u);
-    EXPECT_EQ(merged.bids[0].venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(merged.bids[0].venues[0].slot, SlotOf(VenueId::BYBIT));
     EXPECT_EQ(merged.bids[0].cum_qty, 7u) << "BINANCE's quantity must not be counted";
 }
 
@@ -504,18 +508,18 @@ TEST(ConsolidatedBookTest, ReusedBufferDropsAVenueThatWentStale) {
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
 
     Book merged;
-    MergeBooks(books, merged, kDefaultMaxDepth, nullptr);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, nullptr);
     ASSERT_EQ(merged.bids.size(), 2u);
 
     // Same buffer, second merge, BINANCE now stale.
     const auto health = Health(kStale, kLive, kLive);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     ASSERT_EQ(merged.bids.size(), 1u);
     EXPECT_EQ(merged.bids[0].price, 99u);
     EXPECT_EQ(merged.bids[0].cum_qty, 7u);
     EXPECT_EQ(merged.bids[0].venue_count, 1u);
-    EXPECT_EQ(merged.bids[0].venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(merged.bids[0].venues[0].slot, SlotOf(VenueId::BYBIT));
 }
 
 // kDisconnected is the verdict we can make with certainty - every socket for
@@ -530,12 +534,12 @@ TEST(ConsolidatedBookTest, DisconnectedVenueIsExcluded) {
     Book merged;
 
     const auto health = Health(kDisconnected, kLive, kLive);
-    MergeBooks(books, merged, kDefaultMaxDepth, &health);
+    MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
     ASSERT_EQ(merged.bids.size(), 1u);
     EXPECT_EQ(merged.bids[0].price, 49900u);
     EXPECT_EQ(merged.bids[0].venue_count, 1u);
-    EXPECT_EQ(merged.bids[0].venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(merged.bids[0].venues[0].slot, SlotOf(VenueId::BYBIT));
 }
 
 // Each non-live state must exclude on its own. Testing them together would
@@ -549,7 +553,7 @@ TEST(ConsolidatedBookTest, EveryNonLiveStateExcludesIndependently) {
         Book merged;
 
         const auto health = Health(bad, kLive, kLive);
-        MergeBooks(books, merged, kDefaultMaxDepth, &health);
+        MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth, &health);
 
         ASSERT_EQ(merged.bids.size(), 1u) << "state " << static_cast<int>(bad);
         EXPECT_EQ(merged.bids[0].price, 99u) << "state " << static_cast<int>(bad);

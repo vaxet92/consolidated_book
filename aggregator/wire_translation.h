@@ -1,7 +1,12 @@
 #pragma once
 
+#include <array>
+#include <functional>
+#include <string_view>
+
 #include "md_core/consolidated_bbo.h"
 #include "md_core/consolidated_book.h"
+#include "types/venue_registry.h"
 #include "aggregator.pb.h"
 
 namespace market_data {
@@ -11,9 +16,29 @@ namespace market_data {
 // actually be produced here - every VenueId case is handled explicitly.
 wire::Venue ToWire(VenueId venue);
 
-wire::ConsolidatedPriceLevel ToWire(const consolidated::ConsolidatedPriceLevel& level);
+// Slot -> wire venue, resolved ONCE per published message rather than per
+// level (DESIGN.md §17.6).
+//
+// KEY: md_core attributes levels by SLOT and knows no venue names; the wire
+// carries a venue enum. Something has to bridge the two, and the cheap place
+// is here: a merged book has up to 1000 levels with several contributors each,
+// which is thousands of lookups to produce at most kMaxVenues distinct
+// answers. Build the table once from Core::VenueName, then index it.
+//
+// KNOWN LIMIT: wire::Venue is itself a fixed proto enum (BINANCE/BYBIT/OKX),
+// so a fourth venue would resolve to VENUE_UNSPECIFIED here even though
+// md_core handles it correctly. Removing that needs a proto change - carrying
+// a slot plus a per-message slot->name dictionary (§17.7's B3) - which changes
+// the published contract and every client, and is NOT done.
+using VenueWireTable = std::array<wire::Venue, kMaxVenues>;
 
-wire::Bbo ToWire(const consolidated::BBO& bbo);
+// Builds the table from a slot -> name resolver, typically Core::VenueName.
+// An unregistered slot maps to VENUE_UNSPECIFIED.
+VenueWireTable MakeVenueWireTable(const std::function<std::string_view(VenueSlot)>& venue_name);
+
+wire::ConsolidatedPriceLevel ToWire(const consolidated::ConsolidatedPriceLevel& level, const VenueWireTable& venues);
+
+wire::Bbo ToWire(const consolidated::BBO& bbo, const VenueWireTable& venues);
 
 // The band results don't carry their own threshold - the caller holds the
 // request's threshold list and zips it positionally with the results, which

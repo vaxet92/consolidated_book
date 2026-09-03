@@ -312,19 +312,19 @@ int main(int argc, char** argv) {
 
         FillIsolation(books, 1, fixture.isolation);
         bench.Measure("merge_1venue", [&] {
-            MergeBooks(books, merged);
+            MergeBooks(books, kVenueCount, merged);
             return merged.bids.size();
         });
 
         FillIsolation(books, 2, fixture.isolation);
         bench.Measure("merge_2venue", [&] {
-            MergeBooks(books, merged);
+            MergeBooks(books, kVenueCount, merged);
             return merged.bids.size();
         });
 
         FillIsolation(books, 3, fixture.isolation);
         bench.Measure("merge_3venue", [&] {
-            MergeBooks(books, merged);
+            MergeBooks(books, kVenueCount, merged);
             return merged.bids.size();
         });
     }
@@ -338,15 +338,15 @@ int main(int argc, char** argv) {
         FillRealistic(books, fixture);
 
         bench.Measure("merge_depth_50", [&] {
-            MergeBooks(books, merged, 50);
+            MergeBooks(books, kVenueCount, merged, 50);
             return merged.bids.size();
         });
         bench.Measure("merge_depth_400", [&] {
-            MergeBooks(books, merged, 400);
+            MergeBooks(books, kVenueCount, merged, 400);
             return merged.bids.size();
         });
         bench.Measure("merge_full", [&] {
-            MergeBooks(books, merged, kDefaultMaxDepth);
+            MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth);
             return merged.bids.size();
         });
     }
@@ -407,8 +407,12 @@ int main(int argc, char** argv) {
         bench.Measure("bbo_incremental", [&] {
             const PriceTicks bid = kMidPrice - kTick - static_cast<PriceTicks>(tick++ % 3) * kTick;
             BboQuote quote = MakeQuote(VenueId::BINANCE, bid, kMidPrice + kTick);
-            quotes[static_cast<size_t>(VenueId::BINANCE)] = quote;
-            UpdateBBOWithQuote(bbo, quote, quotes);
+            // slot == VenueId here: the fixture fills the quote array by index
+            // rather than going through Core::RegisterVenue, so it picks that
+            // layout deliberately (DESIGN.md §17.6).
+            constexpr VenueSlot kBinanceSlot = static_cast<VenueSlot>(static_cast<size_t>(VenueId::BINANCE));
+            quotes[VenueSlotIndex(kBinanceSlot)] = quote;
+            UpdateBBOWithQuote(bbo, quote, kBinanceSlot, quotes);
             return bbo.best_bid.price;
         });
 

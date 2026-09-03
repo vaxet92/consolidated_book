@@ -85,7 +85,12 @@ struct Book {
     //
     // Also the natural input for `VenueStatus` on the wire, which currently
     // reports no depth at all.
-    std::array<uint32_t, kVenueCount> venue_levels{};
+    //
+    // Sized by kMaxVenues and indexed by SLOT, like every other per-venue
+    // array (DESIGN.md §17.6). Pure capacity - the entries are counts, with no
+    // venue identity in them, so an unused slot reads 0, which is already what
+    // "this venue contributed nothing" means.
+    std::array<uint32_t, kMaxVenues> venue_levels{};
 
     // Clears without releasing capacity, so a Book reused across publishes
     // stops allocating after warm-up (§7.5).
@@ -127,7 +132,13 @@ inline constexpr size_t kDefaultMaxDepth = 1500;
 // The tests that exercise merge behaviour alone rely on this default, so the
 // guarantee that production never forgets to pass it is a Core-level test,
 // not this signature.
-void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth = kDefaultMaxDepth,
+// `venue_count` bounds every per-venue loop. Pass Core's high-water mark, not
+// kVenueCount and not books.size(): the enum bound silently drops any venue
+// registered beyond it, and the capacity bound iterates empty slots on a path
+// measured in microseconds. A slot whose venue was removed is still counted
+// and skipped as a null book - slots are dense, so a removal leaves a hole and
+// stopping early would drop every venue above it (DESIGN.md §17.6).
+void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size_t max_depth = kDefaultMaxDepth,
                 const VenueHealthArray* health = nullptr);
 
 // ---------------------------------------------------------------------------

@@ -780,3 +780,445 @@ For crypto specifically this is easier than it sounds — Binance, OKX and Bybit
 Already covered in §7.3b and unchanged by the above. A process boundary between provider and core serializes every book update to replace a pointer move. The boundary that *is* needed already exists in the right place: aggregator ↔ clients, over gRPC.
 
 **Superseded at production scale — see §17.** The argument above weighs only latency, and at one symbol on one host it wins. It does not weigh the three things production actually asks for: adding a venue without restarting the merge, removing an instrument without restarting anything, and placing a provider in a different region from the core (§16.4). Each of those needs a process boundary that this section rejects. §17 adopts the split, and §17.10 lists what it costs — including the serialization hop this section correctly identified.
+
+---
+
+## 17. Production topology — control plane and data plane
+
+**Almost none of this is built** — the exception is the venue-slot work in §17.6, which is, and says so under "Implementation status". Everything else here is design.
+
+§16 asks "how would this scale?" and answers it in terms of throughput and geography. This section answers a different question: **how does this run 24/7?** Crypto never closes, so the operations that a daily-restart system does at 04:00 — add a venue, add a symbol, drop a symbol, deploy a fix — all have to happen while the market is live.
+
+That question, and only that question, is what reverses §7.3b and §16.5.
+
+### 17.1 What changed since §7.3b
+
+§7.3b rejected a process boundary between provider and core because it serializes every update to replace a pointer move. That is correct, and it is still correct for what ships: one symbol, one host, one process.
+
+Three production requirements sit outside what that argument weighed:
+
+| Requirement | Cost in the single-process design |
+|---|---|
+| Add a venue | recompile (`VenueId` is an enum) and restart — every venue and every client gaps |
+| Add or drop an instrument | restart — same blast radius |
+| Put a provider near its exchange (§16.4) | impossible; one process is on one host |
+
+The blast radius is the real problem, more than the restart itself. One process holds all venues, all instruments, all clients, and one global `apply_mutex_`. A change to any part of it stops all of it.
+
+**The trade being made:** a serialization hop on every update (§17.10 sizes it) in exchange for the ability to add, remove and relocate any part of the system without stopping the rest. At one symbol that trade is bad — which is why §7.3b rejected it and why it is kept. At twenty symbols and three venues running continuously, it is the only thing that answers the question.
+
+> **KEY:** The boundary this section adds is cheap **because §9 already drew it.** Providers own parsing, continuity and resync; Core consumes only validated normalized `BookUpdate`. Splitting them replaces an in-process callback with a wire write — it does not move a single decision from one component to another. A design that needed re-layering to be split would not be worth splitting.
+
+### 17.2 The three components
+
+```
+                     ┌──────────────────────────┐
+   clients ─────────►│    Control Manager       │   control plane
+   (subscribe /      │  valid venue registry    │   restartable
+    unsubscribe)     │  refcounts + linger      │   NOT on the hot path
+                     │  spawn / SIGTERM         │
+                     └────────────┬─────────────┘
+                                  │ process lifecycle only
+                                  ▼
+              ┌──────────────────────┐         ┌──────────────────┐
+              │   md_provider (xN)   │────────►│     md_core      │──► gRPC ──► clients
+              │  one per (venue,     │  one    │  venue-blind     │
+              │  instrument)         │  TCP    │  books, merge,   │    data plane —
+              │  parse, continuity,  │  conn   │  bands, publish  │    runs with the
+              │  resync, watchdog    │  each   │                  │    CM down
+              └──────────────────────┘         └──────────────────┘
+```
+
+Ownership, stated so that no component reaches into another's decision:
+
+| Component | Decides | Never decides |
+|---|---|---|
+| **Control Manager** | *lifecycle* — what exists, when it starts and stops | anything about a book or a price |
+| **md_provider** | *protocol* — parsing, sequencing, gap detection, resync | whether a venue is admitted to the merge |
+| **md_core** | *admission* — which venues enter the merge, and the merged output | anything exchange-specific |
+
+> **KEY:** The Control Manager **never sends a message to md_core.** Not on add, not on remove, not ever. It manages provider processes; the effect on md_core arrives through the data plane as a connection opening or closing (§17.4). This is the single most important property of the topology: it means the control plane can be down, restarting, or misconfigured without any path by which it can corrupt the merged book.
+
+**The control plane is not on the hot path**, which is what makes restarting it acceptable. While the CM is down: no new subscriptions, no removals. Every existing feed keeps flowing and every client keeps receiving. Those are different outages and should never be described as one.
+
+### 17.3 Control Manager
+
+**State.** Which `(venue, instrument, sub_type)` are wanted, and by whom.
+
+```json
+{ "version": 1,
+  "subscriptions": [
+    {"venue":"binance","instrument":"BTCUSDT","type":"BOOK","holders":["client-7"]},
+    {"venue":"binance","instrument":"BTCUSDT","type":"BBO", "holders":["client-7","client-9"]}
+  ]}
+```
+
+Persisted as **one JSON file**, written to a temp path and `rename()`d over the original. Read at startup; a missing file means empty state.
+
+Not SQLite, not etcd: this is tens of rows and a few writes per minute. The parse cost is irrelevant at control-plane rate, and a file an operator can open and read during an incident is worth more than a query language. `rename()` is atomic on POSIX, so the file is never half-written — **crash-safety comes free rather than being designed for**, which is a better position than assuming clean shutdowns.
+
+> **KEY:** Holders are stored as **rows, not a count.** A persisted integer cannot be corrected: if a client dies while the CM is down, that count is permanently too high, and a refcount that only ever grows means nothing is ever unsubscribed. With holder identities, a CM restart plus a grace period garbage-collects dead clients as a side effect of them not reconnecting.
+
+**Client interface.** A client holds a long-lived gRPC stream to the CM. The stream *is* the subscription.
+
+```
+client opens Subscribe stream (BTCUSDT, BOOK)
+  -> refcount++ ; if this is the first holder, spawn the provider process
+  -> stream carries subscription state: PENDING -> WARMING -> LIVE
+client closes the stream, or dies
+  -> refcount-- ; if zero, linger, then SIGTERM
+```
+
+An explicit `Unsubscribe` is supported as an optimisation that skips the linger — never as the thing correctness depends on, because a crashed client will not send one.
+
+**Linger** (~30 s) before killing a provider at refcount zero. A client that reconnects after a brief network blip should not pay the REST snapshot and warm-up again. It costs one idle subscription for half a minute and removes a whole class of subscribe/unsubscribe thrash.
+
+**Actions are process lifecycle, nothing else:**
+
+```
+add    (venue, instrument)  ->  spawn md_provider
+remove (venue, instrument)  ->  SIGTERM
+```
+
+**Cold start is accepted.** A new subscription takes a few hundred milliseconds — WS subscribe, REST snapshot for Binance, then buffering and alignment before the first valid update. This is a deliberate non-goal: the hot path must be fast, subscription setup need not be. It is visible to the client as the `PENDING → WARMING → LIVE` states, so an empty book during warm-up reads as expected behaviour rather than as a bug.
+
+### 17.4 Connection lifetime is subscription lifetime
+
+This is the mechanism that lets the Control Manager stay out of the data plane.
+
+**md_core listens on one address; providers dial in.** One TCP connection per provider process. The `kHello` handshake (§17.7) tells md_core which `(venue, instrument)` that connection carries, so **accept is registration**.
+
+> **KEY:** The **dynamic** side dials the **static** side. Providers are spawned and killed constantly; md_core is always at a known address. So md_core needs no service discovery, no provider list, and no notification that a provider is about to exist. The reverse direction would require the CM to tell md_core about every new provider — reintroducing exactly the control channel §17.2 removes.
+
+One connection *per process* is what makes the rest work. If several providers shared a connection, one exiting would close nothing.
+
+#### Removal is the socket closing — not silence
+
+Three distinct signals, and conflating any two of them is a bug:
+
+| md_core observes | Cause | Book |
+|---|---|---|
+| Socket open, no messages past the backstop | quiet or sick venue (§6.2c) | **stale** — excluded from the merge, **kept** |
+| `read()` returns 0 (FIN) | provider process gone | **removed** — freed |
+| TCP keepalive probes unanswered | host or network gone | **removed** — same path as FIN |
+
+> **KEY:** Silence is **ambiguous** — a quiet market, a dead venue and a deliberate removal are indistinguishable from the message stream alone. A closed socket is **unambiguous**: the process on the other end no longer exists. This is why removal hangs off the connection and never off a timeout. If silence removed books, a thirty-second network blip would free the book and force a full REST resync on recovery — precisely the damage §6 exists to prevent.
+
+Nobody *sends* an EOF. The **kernel** closes a dead process's file descriptors and sends FIN, so this works for `SIGKILL`, a segfault and an OOM kill — cases where no application-level goodbye could ever be sent. That is the whole reason to build removal on it.
+
+`SO_KEEPALIVE` covers the one case the kernel cannot: a dead host or severed link sends no FIN, and md_core would otherwise wait forever on a socket that will never speak again. Tuned probes surface it as a socket error in a few seconds, handled on the same path as FIN — **no new logic in md_core**.
+
+A `kGoodbye` message before a clean shutdown changes no behaviour; it only lets md_core log *clean shutdown* versus *unexpected disconnect*. During an incident that one line is the difference between five minutes and an hour.
+
+#### Removing a venue does not remove the instrument
+
+A closed connection frees one `(instrument, venue_slot)`. If other venues still supply that instrument the merge continues, thinner — which is already the correct behaviour, and already what the health logic does when a venue goes to `kNoData`. Only when the last venue for an instrument goes does the instrument itself disappear and publishing stop.
+
+#### Crash and deliberate removal share one code path
+
+md_core cannot distinguish them and does not try.
+
+> **KEY:** One path, exercised on every restart, deploy and crash — so it cannot rot the way a cleanup path used twice a year does. The distinction lives in exactly one place: the Control Manager knows whether it sent the `SIGTERM`. A close the CM ordered is routine; a close it did not order is an **incident**. Alerting logic belongs to the component that has the intent, not to the one that observes the effect.
+
+#### The same idea at the client end
+
+A client's subscription lives as long as its gRPC stream to the CM. One principle — **connection lifetime carries subscription lifetime** — answers both "did the provider go away?" and "did the client go away?", with no heartbeats and no mandatory unsubscribe, and it works when either side crashes rather than disconnecting politely.
+
+#### Resync is never requested by md_core
+
+The provider detects its own gap and repairs it alone:
+
+```
+Binance delta:  U = 105,  last_u = 100
+  -> 105 != 101  -> GAP
+  -> GET /api/v3/depth?limit=1000, buffer deltas, align to lastUpdateId
+  -> emit BookUpdate{ is_snapshot = true }
+```
+
+md_core sees only `is_snapshot = true` and replaces the book. It does not know a gap occurred, and it **could not ask for a resync even if that were wanted** — Binance's `U`/`u` are stripped at the provider boundary by §9, so the core holds no exchange sequence semantics at all.
+
+**Consequence: the provider→core connection is one-directional.** No reverse channel, no request/response, none of the failure modes a bidirectional protocol brings.
+
+When md_core sees something the provider cannot — §6.2b signal 3, a venue silent while its peers are busy — it does not reach across the layer. It escalates:
+
+| | Owner | Trigger | Action | Cost |
+|---|---|---|---|---|
+| 1 | **md_provider** | its own sequence gap | REST resync, emit snapshot | ~200 ms; core never notices |
+| 2 | **md_core** | stale or uncorroborated venue | exclude from the merge, keep the book | none, reversible |
+| 3 | **Control Manager** | provider unhealthy or silent | `SIGTERM` + respawn | full reset of that venue |
+
+Rung 3 *is* the heavy resync, and it needs no new mechanism: killing the provider closes the socket, md_core frees the book, the new process reconnects and rebuilds from a fresh snapshot. md_core never gains a way to command a provider — it refuses to admit the venue and lets the CM decide whether to restart it.
+
+### 17.5 md_provider: one process per (venue, instrument)
+
+```
+md_provider  (binance, BTCUSDT)
+  └── one WS connection
+        ├── btcusdt@depth@100ms     -> BookUpdate
+        └── btcusdt@bookTicker      -> BboQuote
+  └── REST client (Binance only, snapshot seeding — §4.3)
+  └── venue staleness watchdog (§6.5)
+  └── one TCP connection to md_core
+```
+
+Unchanged from §4: parsing, the sync state machine, continuity validation, gap detection, resync and the health verdict all stay here. The only new thing is that the output leaves over a socket instead of a callback.
+
+#### Group size is a knob, not an architecture
+
+The process boundary is `(venue, instrument_group)`. **This design ships with group size 1**, because that is what makes a subscription's lifetime equal its TCP connection's lifetime (§17.4) — which in turn removes the need for subscription epochs, explicit remove messages, and any agreement between two components about when a book dies.
+
+All three venues support per-symbol `unsubscribe` on a live connection, so grouping is not blocked by any protocol:
+
+| Venue | |
+|---|---|
+| Binance | `{"method":"UNSUBSCRIBE","params":["ethusdt@depth"],"id":1}` |
+| Bybit | `{"op":"unsubscribe","args":["orderbook.50.ETHUSDT"]}` |
+| OKX | `{"op":"unsubscribe","args":[{"channel":"books","instId":"ETH-USDT"}]}` |
+
+Raising the group size is therefore a configuration change, and what it buys back is socket count (§17.9 gives the number that decides it). What it costs is the removal mechanism: a grouped provider must tear down one instrument's state in-process, which reintroduces the remove/re-add race and needs a subscription epoch on every update to close it. **That cost is why group size 1 is the default, not performance.**
+
+#### One WS connection carries both BBO and depth
+
+Earlier drafts used two connections so that the depth and BBO streams could fail independently. At group size 1 that is the wrong trade:
+
+- **Connection count is the binding constraint** (§17.9), not CPU. One connection per provider halves it: 3 venues × 10 instruments = **30 sockets** rather than 60.
+- It also halves the connection-**attempt** rate. OKX rate-limits attempts, and a thirty-process restart storm is exactly what would trip that.
+- The head-of-line cost is small at group size 1: deep messages arrive at roughly 10/s for a single instrument, so only a small fraction of BBO updates can sit behind one. At group size 10 this argument reverses and two connections become correct again — it is a consequence of the group size, not a standalone decision.
+
+All three venues support both channels on one connection: Binance combined streams (`?streams=btcusdt@depth@100ms/btcusdt@bookTicker`), Bybit two topics in one `subscribe`, OKX two channels in one `args`.
+
+> **KEY:** One socket is **transport only**. §7 forbids feeding fast-BBO into the depth book, and that is untouched: the two message types stay separate objects (`BookUpdate`, `BboQuote`) on separate wire types, routed to `ApplyUpdate` and `ApplyQuote`. Sharing a TCP connection is not sequencing the two streams together. The rule is about *data*, not about *bytes on a wire*.
+
+Per-stream health (§6.2d) also survives, because the watchdogs arm on **message arrival per stream type**, not per socket — "depth went quiet while BBO keeps flowing" is still detected. **Accepted cost:** socket death now takes both streams down at once, so `depth_health_` and `bbo_health_` become correlated in that one case. Recorded in §17.10 rather than discovered later.
+
+### 17.6 md_core is venue-blind
+
+md_core keeps per-venue books, per-venue health and per-venue attribution. What it must stop having is a *compile-time list of which venues exist*.
+
+Today `VenueId` is an enum and `kVenueCount` sizes every array, so adding a venue is a recompile of md_core — the thing §17 exists to avoid.
+
+**The replacement:** md_core keys on an opaque `venue_slot`, a small dense integer assigned at registration. It never learns the string `"binance"`; the venue name travels only as far as the attribution field on the wire.
+
+Storage is sized at compile time, populated at runtime:
+
+```cpp
+std::array<VenueBook, kMaxVenues> books_;   // fixed capacity, no allocation
+uint8_t active_count_ = 0;                  // loops run to this, not to kVenueCount
+```
+
+| Option | Hot path | Adding a venue |
+|---|---|---|
+| `array<_, kVenueCount>` (today) | best — contiguous, no indirection | **recompile** |
+| `vector<_>` | one indirection, and **resize invalidates references while readers run** | runtime |
+| `array<_, kMaxVenues>` + `active_count_` | identical to today | runtime, up to the cap |
+
+The third is chosen. The cap (`kMaxVenues = 8`) is a deliberate, documented bound rather than an accident — more venues than a consolidated crypto book needs, and a bounded array is preferable to a vector that would have to be resized underneath a reader on the merge path.
+
+#### Implementation status
+
+Unlike the rest of §17, part of this subsection **is built**. What follows is the state of the code, not a plan.
+
+**Done:**
+
+- `VenueRegistry` (`types/venue_registry.h`) assigns dense `VenueSlot`s by venue name, with a release/acquire publication so one writer can register while readers run.
+- `VenueBookArray`, `VenueQuoteArray` and `VenueHealthArray` are sized `kMaxVenues`, not `kVenueCount`.
+- `Core::RegisterVenue` / `Core::RemoveVenue` exist. `Init` registers nothing: venues appear when a provider appears (§17.4). `main.cpp` calls `RegisterVenue` as it constructs each provider — the in-process stand-in for `kHello`.
+- `RemoveVenue` deactivates without releasing the slot, frees that venue's book for every instrument, clears its stored quote and forces a BBO rescan.
+- **Slot and `VenueId` are now independent.** `Core` holds a `venue_id_to_slot_` translation table and converts once at each of its three entry points. Registering OKX first gives it slot 0 and everything still resolves.
+- `MergeBooks` takes `venue_count` and every per-venue loop runs to it. Before this, a venue registered beyond `kVenueCount` registered successfully and then never appeared in the output — no error, just a venue silently missing from the merge.
+- **Attribution carries a `VenueSlot`, not a `VenueId`.** `consolidated::VenueQuote` is `{VenueSlot slot, QtyUnits qty}` throughout the merge and the BBO. `Core::VenueName(VenueSlot)` is the only way a venue's identity leaves md_core, and it is called **once per published message** to build a `VenueWireTable`, never per level.
+
+> **KEY:** Carrying the slot rather than the name made attribution **free**. The merge loop's index *is* the slot, so filling a level's attribution costs no lookup at all. Three versions were measured: `static_cast<VenueId>(i)` (free, but wrong once slots diverge from the enum), `books[i]->venue()` per level (correct, and **~3.5–4 µs per merge** — two dependent loads on a heap object evicted by the map traversal), and the same read hoisted into the setup loop (correct, one array read per level). Carrying the slot beats all three: `merge_full / iterate_only` went 0.97 → **0.90**. The correct design turned out to be the fast one, but only after the benchmark rejected two versions that looked fine in review.
+
+Failure modes are chosen so that attribution can be **missing but never wrong**: an unregistered slot, and a forgotten `SetVenueWireTable`, both resolve to `VENUE_UNSPECIFIED` rather than to a real venue.
+
+> **KEY:** `venue_count()` is a **high-water mark and is never decremented.** Slots are dense and assigned in registration order, so removing a venue leaves a HOLE, not a shorter list — decrementing after removing slot 1 of 3 would make every loop stop at 1 and silently drop the venue in slot 2, while the published book still looked well-formed. Removal is not a size change; it is `books[i] == nullptr` plus `health kNoData`, which every loop already skips.
+
+**Not done — a fourth venue still cannot be added.** md_core would handle it correctly; two things outside md_core stop it, and both are on the **wire**:
+
+```protobuf
+enum Venue { VENUE_UNSPECIFIED = 0; BINANCE = 1; BYBIT = 2; OKX = 3; }
+```
+
+1. **The proto has its own venue enum.** A fourth venue flows correctly through registration, storage, the merge and the BBO, reaches `MakeVenueWireTable` — and resolves to `VENUE_UNSPECIFIED`, because the contract has no value for it. Adding one means regenerating and redeploying every client.
+2. **`Core::RegisterVenue` refuses unknown names**, because `VenueBook`'s constructor still takes a `VenueId` and the name has to be converted back once. This is the last dependency md_core has on the enum, kept in one visible place.
+
+> **KEY:** md_core is done; **the wire is not.** The recompile has moved from the merge to the contract. That is a smaller and better-understood problem — but claiming "venues can be added at runtime" would be false, and the difference is exactly the kind of thing a debrief question finds.
+
+The fix is B3 in §17.7's terms: the wire carries `venue_slot` per quote plus a **slot → name dictionary once per message** (`VenueStatus` already exists as the natural home). Integers on the hot path, names sent once — the standard market-data shape. Rejected alternatives: keeping the enum (needs a proto change per venue) and sending the name per quote (a string per venue per level, ~1000 levels, unacceptable payload growth). Not built: it changes the published contract and all three client binaries.
+
+**Measured, and worth reading in full in `becnhmark_results.md`:** the first attribution fix was written inside the per-level loop and cost ~40%. It was caught by benchmark, not by review, and the diagnosis only worked because an unchanged benchmark in the same run separated a real regression from a 10% machine drift between sessions.
+
+> **KEY:** md_core **never creates state from a data message.** A book exists because a connection registered it (§17.4), never because an update arrived naming it. An update for an unknown instrument or an inactive slot is **dropped and counted**. Without this rule, an in-flight update arriving just after a connection closed would silently re-create the book that was just freed — a zombie nobody asked for and nobody will ever remove.
+
+#### Reading the sockets
+
+```
+md_core
+ ├── listen socket ── accept ── kHello ── register (venue, instrument) -> venue_slot
+ │
+ ├── one epoll reader thread (level-triggered)
+ │     per connection: read buffer + framing state
+ │     bounded read budget per socket per round
+ │
+ ├── SPSC queue per connection
+ │
+ └── consolidator thread: round-robin drain, bounded per queue
+       -> ApplyUpdate / ApplyQuote / OnVenueHealth -> merge -> publish
+```
+
+**One reader thread, not one per connection.** At ~30 connections and an estimated ~15,000 msg/s in total this is a small load for one thread, while thirty threads would cost thirty stacks and constant context switching.
+
+Per-socket options, and the first matters more than it looks:
+
+> **KEY:** `TCP_NODELAY` must be **on**. Nagle's algorithm delays small writes waiting for more data — up to ~40 ms where it meets delayed ACK. The messages here are small. Leaving Nagle on would add tens of milliseconds to the stream the whole fast path exists for, and it would present as exchange latency rather than as a socket option.
+
+Also `SO_KEEPALIVE` with tuned probes (§17.4), and non-blocking mode. And TCP is a byte stream: one `read()` may return half a message or two and a half, so every connection needs its own accumulation buffer and framing state. This is why `payload_len` in the header is not optional.
+
+#### Fairness
+
+> **KEY:** Fairness is **not** equal share. Binance genuinely sends more messages than OKX; throttling it to match would delay real data. The requirement is **starvation-freedom** — every socket with data ready is served within a bounded time regardless of how busy its neighbours are.
+
+Two budgets, one per stage:
+
+1. **Reader:** at most `kReadBudget` bytes per socket per `epoll` round, then move on. Leftover bytes stay in the kernel buffer.
+2. **Consolidator:** at most `kDrainBudget` messages per queue per round, round-robin. Never drain one queue fully before touching the next.
+
+This is why the epoll mode is **level-triggered**. Edge-triggered requires draining each fd to `EAGAIN` or the notification is lost — which is exactly the behaviour that lets a busy socket monopolise a round. Level-triggered re-reports the remainder next round, so a budget is safe. It costs some extra `epoll_wait` reports; at this message rate that is not measurable, and it buys starvation-freedom for nothing.
+
+#### Per-connection queues, not one shared queue
+
+Each connection gets its own SPSC queue. One shared queue would head-of-line block: 500 queued Binance messages would delay an OKX message sitting behind them.
+
+There is no global order to preserve — §9 forbids comparing sequence numbers across venues, so updates on different connections have no ordering relationship. Per-connection queues therefore cost nothing in correctness.
+
+> **KEY:** **SPSC, never MPSC.** An MPSC queue needs a CAS on the tail, so producers contend and retry, and tail latency becomes unpredictable under exactly the burst conditions that matter. N SPSC queues have zero producer contention — each producer owns its tail and does a plain release-store. The consumer pays N cache-line loads per round: cheap, and constant. If one reader thread ever becomes the bottleneck, the fix is R reader threads each owning a disjoint set of sockets and its own queues — still SPSC.
+
+**Queue sizing is set by the burst, not the average.** The hypothesis that depth stays at 1 because the consumer is faster than the producer is worth testing, but average throughput does not bound queue depth: all three venues update in the same millisecond after a large print, so messages arrive together. Measure the **maximum** depth under replay, not the mean.
+
+#### Backpressure runs in opposite directions on the two sides
+
+> **KEY:** **provider → core: block, never drop.** Depth deltas are sequenced; a dropped delta is a gap, and a gap costs a full REST resync. Letting the reader block is correct — the TCP receive window closes, the provider's writes block, and the pressure lands where it can be handled.
+>
+> **core → client (§7.4): conflate.** Clients receive self-contained snapshots, so an intermediate state that is never sent loses nothing; the newest snapshot supersedes it. Delivering a backlog of stale books to a slow client is strictly worse than delivering the current one.
+
+Same problem, opposite answers. The difference is sequenced deltas versus self-contained snapshots, and nothing else.
+
+§7.2's ownership rule and §7.3's consolidator survive the split unchanged. Only the **producer** changes: it was a provider callback on the provider's own thread, it is now the socket reader thread.
+
+### 17.7 Wire format
+
+```
+[ msg_type : u16 | payload_len : u32 ]  [ payload ]
+```
+
+| Type | Payload | When |
+|---|---|---|
+| `kHello` | wire version, venue name, instrument | once, first message on the connection |
+| `kBookUpdate` | flat `BookUpdate` | depth snapshot or delta |
+| `kBboQuote` | flat `BboQuote` | fast-BBO |
+| `kHealth` | `VenueHealthEvent` | edge-triggered, §6.5 |
+| `kGoodbye` | reason code | clean shutdown only |
+
+**Snapshot and delta are not separate types.** `BookUpdate` already carries `bool is_snapshot` and md_core already branches on it. A second type would be a second way to say the same thing — the kind of duplication that eventually disagrees with itself.
+
+**Flat POD, not protobuf.** The provider exists to take a JSON parse off the hot path; adding a protobuf parse at the core's input would give part of that back. The client-facing gRPC boundary is a different case — lower rate, external consumers, worth the schema safety. This hop is internal and both ends are ours.
+
+`BookUpdate` cannot cross the wire as it stands: it holds `std::vector<PriceLevel>`, which are heap pointers meaningless to another process (the same constraint §16.3 states for shared memory). The wire form is a fixed header with `bid_count` / `ask_count`, followed by one contiguous run of `PriceLevel`. `static_assert` on `sizeof` and field offsets, so a compiler or padding change fails the build rather than corrupting prices at runtime.
+
+**Version at the handshake, not per message.** Provider and core are deployed separately, so version skew is normal during every rolling upgrade, not an edge case. `kHello` carries the version; if there is no overlap the connection is **refused loudly** rather than guessed at. A per-message version byte would be cheaper to add and useless — you cannot switch parsing strategy mid-stream anyway. The `payload_len` header does the job that matters: an older core can skip a message type it does not recognise instead of desynchronising the stream.
+
+**Compatibility rule: additive only.** New fields at the end; never reorder, never resize, never reuse. An older core reads the prefix it understands and skips the tail, which `payload_len` makes safe.
+
+**Assumption, stated rather than discovered:** one architecture and endianness across the fleet. True for a homogeneous x86 or ARM deployment, false the moment it is not.
+
+### 17.8 Clocks do not survive the split
+
+`BookUpdate` carries `recv_mono_ns`, and §6.2a is explicit that the staleness watchdog may use **only** the monotonic clock, because both readings come from the same never-jumping source and the offset cancels exactly.
+
+> **KEY:** A monotonic clock counts from an arbitrary per-machine origin, usually boot. Once the provider is a different process on a different host, its `recv_mono_ns` is a number from a **different origin**, and `now_mono - recv_mono_ns` computed at md_core is meaningless — not imprecise, meaningless. §6.2a's reasoning is not weakened by the split; it is what tells you the stamp cannot cross.
+
+The watchdog therefore splits in two:
+
+| Watchdog | Runs | Clock | Question |
+|---|---|---|---|
+| **Venue staleness** (§6.2c) | in the provider | provider's monotonic | has the exchange gone quiet? |
+| **Link staleness** | in md_core | md_core's monotonic | has the provider gone quiet? |
+
+The first needs **no change at all** — §6.5 already has the provider compute the verdict and push it, with md_core only storing it. That decision, made so the component with the sockets makes the call, is what lets the venue watchdog survive relocation untouched.
+
+On the wire, `recv_mono_ns` is either dropped or renamed to say *provider-local, never compare across hosts*. Leaving the current name is a trap for the next reader.
+
+`exch_ts_ns` and `recv_ts_ns` (both wall clock) still cross usefully, with §6.2a's warning intact: their difference is staleness plus an unknown clock offset plus network delay — fit for drift estimation, never for admission. Across a WAN hop the network-delay term grows and becomes variable, which makes that warning stronger, not weaker.
+
+**Consequence for §6.2c:** thresholds become per-venue **and per-link**. `kBybitBboBackstopNs = 10s` is derived from Bybit's 3-second L1 republish over a *local* socket. Put a WAN hop with jitter in front of it and the same number either flaps a healthy feed or goes blind. Same conclusion as §16.4's point 3, reached from the transport rather than from geography.
+
+### 17.9 Capacity — and what the binding constraint actually is
+
+**Measured** (`becnhmark_results.md`, 3 venues, 1000 merged levels):
+
+```
+merge_full        median  8.5 us    p99  12.0 us
+merge_depth_400   median  4.0 us
+qty_update_50     median  0.6 us
+bbo_incremental   median  ~0 ns     p99  42 ns
+```
+
+md_core merges eagerly on every depth update, so `merges/s = instruments × depth updates/s`. One consolidator thread saturates at roughly `1 s / 8.5 µs ≈ 118,000 merges/s`. Even at a generous 200 depth updates/s per instrument, ten instruments is ~2,000 merges/s — **on the order of 2% of one core.**
+
+**Conclusion: one consolidator thread is enough at ten instruments. Do not shard.** §16.1's shard key stays the plan for when it is needed; the number says it is not needed yet.
+
+**The caveat, from the benchmark file's own note:** that loop keeps the tree nodes hot in cache, and in production there are milliseconds between merges. `VenueBook` is a `std::map`, so one instrument holds roughly `1000 levels × 2 sides × 3 venues × ~50 B ≈ 300 KB` of pointer-chasing nodes — **estimate, not measured**. Ten instruments is ~3 MB, past L2, with each instrument evicting the others between merges. The per-merge cost at ten instruments will therefore be **worse** than 8.5 µs. Even at 5× it is ~10% of a core and the conclusion holds, but the direction is unfavourable and it should be **measured at ten instruments rather than extrapolated.**
+
+**Parsing is not the limit.** A 1000-level snapshot parses in ~140 µs (**reported by measurement but not yet recorded in `becnhmark_results.md` — record it, with the message size**). Deep messages arrive at ~10/s, so `140 µs × 10/s ≈ 0.14%` of a core per instrument. Ten instruments on one parse thread would be ~1.4%.
+
+Where 140 µs does bite is a **resync storm**: a venue hiccup makes every instrument refetch at once — ten snapshots is ~1.4 ms of serial parse plus ten concurrent REST calls into Binance's weight limit. The burst case, not the steady state, is what to design for.
+
+**The binding constraint is venue connection limits.**
+
+```
+sockets = venues x instruments x 1 connection
+        = 3 x 10 = 30          (60 without §17.5's single connection)
+```
+
+§13 and `config/config.h` already record that venue limits are unverified and that exceeding one does not degrade gracefully — the venue refuses or bans the IP, taking down every connection to it at once, which is the exact failure redundancy was meant to prevent.
+
+> **KEY:** The ceiling on instruments per host is set by **venue connection and connection-attempt limits, not by CPU.** Merge is ~2% of a core and parse ~1.4%; sockets are what run out first. The dangerous moment is not steady state but a **deploy or restart storm**, with thirty processes connecting simultaneously — OKX rate-limits attempts, and thirty concurrent REST snapshots hit Binance's weight limit. Mitigations are operational, not architectural: staggered start, and an outbound IP pool.
+
+That is also the number that sets group size (§17.5): raise it when sockets, not CPU, become the limit.
+
+### 17.10 Accepted costs, and what is not solved
+
+| Cost | Why it is accepted |
+|---|---|
+| **Serialization on every update** — §7.3b's original objection, still valid. Estimated 1–5 µs per socket hop against ~100–300 ns for shared memory and less in-process (§16.3, estimates) | Bought deliberately for hot venue add, live instrument removal and cross-region placement. At one symbol the trade is bad, which is why §7.3b is kept |
+| **Connections scale with instruments** (§16.2 amended) | The price of connection-lifetime removal. Group size is the knob if sockets run short (§17.9) |
+| **Correlated stream health on socket death** (§17.5) | One connection means depth and BBO die together. Venue-side quiet is still detected per stream |
+| **Control Manager is a single point for the control plane** | Data plane runs unchanged while it is down. Only subscribe/unsubscribe stop |
+| **~30 processes to supervise at 10 instruments** | Real operational weight. Bought for a blast radius of one `(venue, instrument)` instead of everything |
+| **Restart storms** (§17.9) | Staggered start and an IP pool. Operational, not architectural |
+
+**Not solved, and out of scope:**
+
+- **Control Manager HA.** One CM only. Two would need leader election and a consistent store, and two CMs both issuing spawn/`SIGTERM` is a much harder problem than the one this section solves. The mitigation is that a CM outage is not a data outage.
+- **Rolling upgrade of md_core itself.** Everything here makes *providers* upgradeable one at a time. md_core is still a single stateful process holding warm books. Blue/green with a warm-up period is the intended answer; it is not designed here.
+- **Venue maintenance windows.** Crypto runs 24/7 but venues do not. "Expected downtime" needs to be a state distinct from "we lost the feed", or every scheduled maintenance pages someone.
+- **Verified venue connection limits.** §17.9's ceiling rests on numbers nobody has checked. `config/config.h` says so; it is still true.
+
+### 17.11 Rejected alternatives
+
+**Removal by staleness timeout.** Rejected: silence cannot distinguish a quiet market, a sick venue and a deliberate removal (§17.4). It would delete books during a network blip and force a REST resync on recovery.
+
+**A `Remove` message from the Control Manager to md_core.** Rejected: it fails in the case it is most needed — a *crashed* provider, which sends nothing. It also creates a remove/re-add race requiring subscription epochs to close. The socket close covers both for free, and keeps the CM out of the data plane entirely (§17.2).
+
+**Subscription epochs on every update.** Rejected as unnecessary *at group size 1*: a closed connection cannot deliver a late update, so the race the epoch guards against cannot occur. They become **required** if group size is raised, since one connection would then outlive one instrument's subscription.
+
+**Persisting the refcount as an integer.** Rejected: it cannot be corrected. A client dying while the CM is down leaves the count permanently high, so subscriptions would only ever accumulate. Holder rows self-correct on reconnect (§17.3).
+
+**SQLite or etcd for CM state.** Rejected at this size: tens of rows, a few writes per minute. `rename()` already gives atomicity, and a readable file is worth more during an incident than a query language. etcd becomes correct only if CM HA is added, which is out of scope.
+
+**One MPSC queue instead of N SPSC.** Rejected: CAS contention on the tail makes latency unpredictable under bursts, which is when it matters (§17.6). There is also no global order to preserve, since §9 forbids cross-venue sequence comparison.
+
+**Edge-triggered epoll.** Rejected: it requires draining each fd to `EAGAIN`, which is exactly how one busy socket starves the others. Level-triggered plus a read budget gives starvation-freedom at negligible cost (§17.6).
+
+**md_core requesting a resync from a provider.** Rejected: md_core holds no exchange sequence semantics (§9) and could not form the request. Escalation is the CM restarting the provider (§17.4) — heavier, but it keeps protocol decisions inside the provider where §9 puts them.

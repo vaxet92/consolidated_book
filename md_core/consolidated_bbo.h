@@ -9,8 +9,20 @@
 namespace market_data {
 namespace consolidated {
 
+// Attribution: which venue contributed, and how much.
+//
+// KEY: carries a VenueSlot, not a VenueId. md_core has no compile-time list of
+// venues (DESIGN.md §17.6) - a slot is whatever registered, and the name is
+// resolved at the WIRE boundary via Core::VenueName. Keeping a VenueId here
+// would put the enum back in the middle of the merged output, which is the one
+// place it is hardest to remove later.
+//
+// It is also smaller and cheaper: VenueSlot is one byte against VenueId's two,
+// and the merge writes this per output level, so the array below sits in every
+// MergedLevel. And because the merge loop's index IS the slot, filling it
+// needs no lookup at all - not even the array read the VenueId version needed.
 struct VenueQuote {
-    VenueId venue;
+    VenueSlot slot;
     QtyUnits qty;
 };
 
@@ -87,7 +99,20 @@ void ComputeBBOFromQuotesInto(const VenueQuoteArray& quotes, BBO& out, const Ven
 // it. Excluding it requires the caller to force a full ComputeBBOFromQuotes
 // rescan when a venue's health CHANGES (DESIGN_1 §6.6). Filtering a stateless
 // recomputation is easy; filtering an incremental one needs the transition.
-void UpdateBBOWithQuote(BBO& current, const BboQuote& update, const VenueQuoteArray& quotes,
+//
+// `slot` is where this venue's entry lives in `quotes` and in `health`, and it
+// is passed rather than derived from update.venue.
+//
+// KEY: those two arrays are indexed by SLOT, while update.venue is a VenueId.
+// They coincide today only because venues happen to register in enum order
+// (DESIGN.md §17.6). Deriving the index from the VenueId would read ANOTHER
+// venue's health verdict once they diverge - admitting a stale venue, or
+// excluding a live one, with nothing in the output to show for it.
+//
+// Passed in rather than looked up so this function stays pure: it takes no
+// registry, holds no state, and md_core keeps exactly one place where a
+// VenueId becomes a slot.
+void UpdateBBOWithQuote(BBO& current, const BboQuote& update, VenueSlot slot, const VenueQuoteArray& quotes,
                         const VenueHealthArray* health = nullptr);
 
 // TODO: not built yet. Will follow once §8.2/§8.3's band math lands in

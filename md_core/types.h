@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "types/venue.h"
+#include "types/venue_registry.h"
 
 namespace market_data {
 
@@ -103,7 +104,28 @@ struct BboQuote {
 // consolidation, not consolidated output - which is why it lives here at
 // market_data scope, mirroring VenueBookArray, rather than in the
 // `consolidated` namespace.
-using VenueQuoteArray = std::array<BboQuote, kVenueCount>;
+//
+// Sized by kMaxVenues (fixed CAPACITY) rather than kVenueCount (compile-time
+// venue LIST) - DESIGN.md §17.6, same reason and same step as VenueBookArray.
+//
+// KEY: unlike VenueBookArray this holds values, not pointers, so there is no
+// null to check. Safety comes from the sentinel that already exists: an unused
+// slot is a default-constructed BboQuote with price = 0, which every reader
+// already treats as "this venue hasn't sent one yet". The new slots are in a
+// state the code has always handled - they are simply venues that never spoke.
+//
+// MEASURED COST, accepted deliberately: bbo_fullscan is ~104 ns for 3 venues
+// (becnhmark_results.md). Until the loop bounds move from kVenueCount to the
+// registry's runtime size, that scan walks 8 slots instead of 3 and is
+// correspondingly slower. bbo_incremental - the common path, ~0-42 ns - is
+// untouched, and the fullscan only runs when a BBO health verdict changes
+// (md_core.h), not per quote. The regression is real, temporary, and closes
+// when the loop bounds migrate.
+//
+// Space: BboQuote is ~72 bytes, so 5 unused slots is ~360 bytes per instrument
+// - roughly 3.6 KB at 10 instruments. An order of magnitude more than
+// VenueBookArray's pointers, still small enough not to trade correctness for.
+using VenueQuoteArray = std::array<BboQuote, kMaxVenues>;
 
 // Core's own config, typed (VenueId/InstrumentId), not raw strings.
 // Whoever loads the config file (main.cpp) translates strings to enums

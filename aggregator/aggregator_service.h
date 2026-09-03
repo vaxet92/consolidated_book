@@ -12,6 +12,7 @@
 #include "md_core/consolidated_bbo.h"
 #include "md_core/consolidated_book.h"
 #include "types/venue.h"
+#include "wire_translation.h"
 
 namespace market_data {
 
@@ -32,7 +33,23 @@ class AggregatorServiceImpl final : public wire::Aggregator::Service {
     // one shared snapshot, so Core never learns what any client asked for.
     void PublishBook(InstrumentId instrument, std::shared_ptr<const consolidated::Book> book);
 
+    // Slot -> wire venue, for resolving the attribution md_core publishes by
+    // slot (DESIGN.md §17.6). Set by main.cpp once, after every provider has
+    // registered and before the gRPC server starts.
+    //
+    // KEY: set once, before publishing begins. If venues ever register while
+    // the server is live, this has to be rebuilt and the rebuild synchronised
+    // against the publish path - not needed today, because main.cpp registers
+    // everything up front, but it is the thing that breaks first when venue
+    // registration becomes dynamic (§17.4).
+    void SetVenueWireTable(const VenueWireTable& venues) { venue_wire_table_ = venues; }
+
    private:
+    // Defaults to VENUE_UNSPECIFIED everywhere, so a forgotten
+    // SetVenueWireTable shows up as unattributed levels rather than as
+    // levels attributed to the wrong exchange.
+    VenueWireTable venue_wire_table_{};
+
     using Channel = ConflatedChannel<wire::Update>;
 
     struct Subscription {

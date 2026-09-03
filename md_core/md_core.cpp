@@ -11,16 +11,26 @@ void Core::Init(const CoreConfig& config) {
     venue_quotes_.reserve(config.default_instruments.size());
     consolidated_bbo_.reserve(config.default_instruments.size());
 
+    // KEY: Init registers NO venues. It allocates capacity and nothing else.
+    // Venues appear when a provider appears (Core::RegisterVenue), never
+    // because config named one - see md_core.h. config.venues is still read by
+    // main.cpp to decide which providers to construct; Core no longer uses it,
+    // and it is removed from CoreConfig in a later step.
     for (InstrumentId instrument : config.default_instruments) {
-        AddInstrument(instrument, config.venues);
+        AddInstrument(instrument);
 
         // Reserve the attribution vectors once, so the hot path
         // (UpdateBBOWithQuote) never allocates: it only ever clear()s and
         // push_back()s within this capacity, and never assigns a whole level.
-        // Sized off VenueId::COUNT, so adding venues needs no change here.
+        //
+        // Sized off kMaxVenues, not the venues registered so far: this is
+        // reserved once at startup, when nothing has registered yet, and any
+        // number of venues up to the cap may contribute to a level later.
+        // Under-reserving would put an allocation back on the hot path the
+        // first time a venue joined.
         auto& bbo = consolidated_bbo_[instrument];
-        bbo.best_bid.venues.reserve(kVenueCount);
-        bbo.best_ask.venues.reserve(kVenueCount);
+        bbo.best_bid.venues.reserve(kMaxVenues);
+        bbo.best_ask.venues.reserve(kMaxVenues);
     }
 }
 
@@ -54,7 +64,18 @@ void Core::ApplyUpdate(const BookUpdate& update) {
         return;
     }
 
-    auto& book_ptr = venue_it->second[static_cast<size_t>(update.venue)];
+    // Translate the wire's venue identity into Core's storage index. An
+    // unregistered venue has no slot, so its update is DROPPED - Core never
+    // creates state from a data message (§17.6). This is also the path an
+    // update still in flight when its venue was removed takes.
+    const std::optional<VenueSlot> slot = SlotFor(update.venue);
+    if (!slot.has_value()) {
+        Logger::Log(LogLevel::kWarning, "Received update for unregistered venue: {}",
+                    VenueConverter::ToVenueString(update.venue));
+        return;
+    }
+
+    auto& book_ptr = venue_it->second[VenueSlotIndex(*slot)];
     if (!book_ptr) {
         Logger::Log(LogLevel::kWarning, "Received update for unconfigured venue: {}",
                     VenueConverter::ToVenueString(update.venue));
@@ -88,7 +109,8 @@ void Core::ApplyUpdate(const BookUpdate& update) {
         //
         // depth_health_, not bbo_health_ - this is the depth book, and the
         // two streams are separate sockets that fail independently (§6.2d).
-        consolidated::MergeBooks(venue_it->second, *merged, consolidated::kDefaultMaxDepth, &depth_health_);
+        consolidated::MergeBooks(venue_it->second, venue_count(), *merged, consolidated::kDefaultMaxDepth,
+                                 &depth_health_);
 
         // Set AFTER MergeBooks: Clear() resets the vectors and the merge knows
         // nothing about provenance, so this has to be stamped here, by the one
@@ -128,10 +150,15 @@ void Core::OnVenueHealth(const VenueHealthEvent& event) {
     // edge-triggered - a handful of calls in a healthy run, not per tick.
     std::lock_guard<std::mutex> lock(apply_mutex_);
 
-    const size_t index = static_cast<size_t>(event.venue);
-    if (index >= kVenueCount) {
-        return;  // unknown venue - nothing sensible to record
+    // Same translation as ApplyUpdate: the health arrays are indexed by slot,
+    // and the event carries a VenueId. A verdict for an unregistered venue has
+    // nowhere to go and is discarded rather than written to slot
+    // static_cast<size_t>(venue), which would be some other venue's verdict.
+    const std::optional<VenueSlot> slot = SlotFor(event.venue);
+    if (!slot.has_value()) {
+        return;
     }
+    const size_t index = VenueSlotIndex(*slot);
 
     VenueHealthArray& target = (event.stream == StreamKind::kDepth) ? depth_health_ : bbo_health_;
     if (target[index] == event.health) {
@@ -184,10 +211,22 @@ void Core::ApplyQuote(const BboQuote& quote) {
         return;
     }
 
+    // Same translation as ApplyUpdate. A quote from an unregistered venue is
+    // dropped: storing it at static_cast<size_t>(quote.venue) would overwrite
+    // whatever venue actually holds that slot, and the BBO would then publish
+    // one venue's price under another's name.
+    const std::optional<VenueSlot> maybe_slot = SlotFor(quote.venue);
+    if (!maybe_slot.has_value()) {
+        Logger::Log(LogLevel::kWarning, "Received quote for unregistered venue: {}",
+                    VenueConverter::ToVenueString(quote.venue));
+        return;
+    }
+    const VenueSlot slot = *maybe_slot;
+
     // Store BEFORE folding it in: UpdateBBOWithQuote's rescan path re-reads
     // this array, so it must already hold the new quote (see the precondition
     // on that function).
-    quotes_it->second[static_cast<size_t>(quote.venue)] = quote;
+    quotes_it->second[VenueSlotIndex(slot)] = quote;
 
     consolidated::BBO& bbo = consolidated_bbo_[quote.instrument];
 
@@ -206,7 +245,7 @@ void Core::ApplyQuote(const BboQuote& quote) {
         consolidated::ComputeBBOFromQuotesInto(quotes_it->second, bbo, &bbo_health_);
         seen = bbo_health_version_;
     } else {
-        consolidated::UpdateBBOWithQuote(bbo, quote, quotes_it->second, &bbo_health_);
+        consolidated::UpdateBBOWithQuote(bbo, quote, slot, quotes_it->second, &bbo_health_);
     }
 
     if (bbo_callback_) {
@@ -214,10 +253,16 @@ void Core::ApplyQuote(const BboQuote& quote) {
     }
 }
 
-void Core::AddInstrument(InstrumentId instrument, const std::vector<VenueId>& venues) {
+void Core::AddInstrument(InstrumentId instrument) {
+    // Starts ALL NULL, then fills the slots of venues already registered. An
+    // instrument added before any provider has connected is legal and simply
+    // publishes nothing until one does - which is the same state a venue that
+    // has not spoken yet is in, and the merge already skips it.
     VenueBookArray venue_books;
-    for (VenueId venue : venues) {
-        venue_books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, instrument);
+    for (size_t index = 0; index < active_venues_.size(); ++index) {
+        if (active_venues_[index].has_value()) {
+            venue_books[index] = std::make_unique<VenueBook>(*active_venues_[index], instrument);
+        }
     }
     venue_books_[instrument] = std::move(venue_books);
 
@@ -225,6 +270,87 @@ void Core::AddInstrument(InstrumentId instrument, const std::vector<VenueId>& ve
     // "no data yet" until its first fast-BBO message arrives, which is
     // exactly what ComputeBBOFromQuotes skips on.
     venue_quotes_[instrument] = VenueQuoteArray{};
+}
+
+std::optional<VenueSlot> Core::RegisterVenue(std::string_view name) {
+    // VenueBook's constructor still takes a VenueId, so the name has to be
+    // converted back exactly once, here. This is the last dependency Core has
+    // on the enum; the step that migrates VenueBook to VenueSlot removes it.
+    const VenueId venue = VenueConverter::ToVenueId(std::string(name));
+    if (venue == VenueId::COUNT) {
+        Logger::Log(LogLevel::kError, "[Core] RegisterVenue: unknown venue name '{}' - refusing", name);
+        return std::nullopt;
+    }
+
+    std::lock_guard<std::mutex> lock(apply_mutex_);
+
+    const std::optional<VenueSlot> slot = venue_registry_.Register(name);
+    if (!slot.has_value()) {
+        Logger::Log(LogLevel::kError, "[Core] RegisterVenue: registry full at {} venues, refusing '{}'", kMaxVenues,
+                    name);
+        return std::nullopt;
+    }
+    const size_t index = VenueSlotIndex(*slot);
+
+    // Slot and VenueId are now INDEPENDENT. Registering OKX first gives it
+    // slot 0, and venue_id_to_slot_ is what makes every later lookup find it.
+    // There is deliberately no check that the two agree - requiring that was
+    // the restriction this table removes.
+    //
+    // Idempotent: a provider that crashed and reconnected re-registers the
+    // same name, gets the same slot, and finds its books already there.
+    active_venues_[index] = venue;
+    venue_id_to_slot_[static_cast<size_t>(venue)] = *slot;
+    for (auto& [existing_instrument, books] : venue_books_) {
+        if (!books[index]) {
+            books[index] = std::make_unique<VenueBook>(venue, existing_instrument);
+        }
+    }
+
+    Logger::Log(LogLevel::kInfo, "[Core] venue '{}' registered in slot {} ({} active)", name, index,
+                venue_registry_.size());
+    return slot;
+}
+
+void Core::RemoveVenue(VenueSlot slot) {
+    const size_t index = VenueSlotIndex(slot);
+
+    std::lock_guard<std::mutex> lock(apply_mutex_);
+
+    if (index >= venue_registry_.size() || !active_venues_[index].has_value()) {
+        Logger::Log(LogLevel::kWarning, "[Core] RemoveVenue: slot {} is not active - ignoring", index);
+        return;
+    }
+
+    // Deactivate, do not release. venue_registry_ keeps the name -> slot
+    // mapping so a reconnecting provider lands back here (see md_core.h).
+    // venue_id_to_slot_ IS cleared, so an update that arrives after this point
+    // finds no slot and is dropped rather than landing in a freed book.
+    venue_id_to_slot_[static_cast<size_t>(*active_venues_[index])].reset();
+    active_venues_[index].reset();
+
+    for (auto& [instrument, books] : venue_books_) {
+        books[index].reset();
+    }
+
+    // KEY: the quote must be CLEARED, not just orphaned. consolidated_bbo_ is
+    // maintained incrementally, so this venue's last price is already inside
+    // it and the venue will never send another quote to displace it. Leaving
+    // the slot populated would let a full rescan pick the price of a venue
+    // that no longer exists.
+    for (auto& [instrument, quotes] : venue_quotes_) {
+        quotes[index] = BboQuote{};
+    }
+
+    depth_health_[index] = VenueHealth::kNoData;
+    bbo_health_[index] = VenueHealth::kNoData;
+
+    // Forces every instrument's next quote onto the full-rescan path, for the
+    // same reason: an incremental update cannot remove a price that is already
+    // in the running BBO.
+    ++bbo_health_version_;
+
+    Logger::Log(LogLevel::kInfo, "[Core] venue slot {} removed", index);
 }
 
 void Core::RemoveInstrument(InstrumentId instrument) {

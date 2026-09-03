@@ -3,8 +3,20 @@
 namespace market_data {
 namespace consolidated {
 
-void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const VenueHealthArray* health) {
+void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size_t max_depth,
+                const VenueHealthArray* health) {
     out.Clear();  // keeps capacity - no allocation after warm-up
+
+    // Every loop below runs to `venue_count`, never to kVenueCount. Bounding
+    // by the enum is what made a fourth venue register successfully and then
+    // never appear in the output - no error, just a venue quietly missing
+    // from the merge (DESIGN.md §17.6).
+    //
+    // The caller passes Core's high-water mark, so a slot whose venue was
+    // removed is still iterated and skipped as a null book. That is correct:
+    // slots are dense and a removed venue leaves a HOLE, so stopping early
+    // would drop every venue above it.
+    const size_t count = std::min(venue_count, books.size());
 
     // Admission is decided once, here, and then read by both sides. Deciding
     // it per side could let bids and asks disagree about which venues are in,
@@ -15,8 +27,14 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
     // nullptr admits everything: an absent policy is not the same as a policy
     // that excludes, and a pure merge with no verdict supplied must merge
     // what it was given.
-    std::array<bool, kVenueCount> admitted{};
-    for (size_t i = 0; i < kVenueCount; ++i) {
+    std::array<bool, kMaxVenues> admitted{};
+
+    // No venue-id lookup here any more. An earlier version read
+    // books[i]->venue() to attribute each level, which cost a MEASURED
+    // ~3.5-4 us per merge when done per level, and one array read per level
+    // after being hoisted here (becnhmark_results.md). Carrying a VenueSlot in
+    // VenueQuote removes both: the merge index already IS the slot.
+    for (size_t i = 0; i < count; ++i) {
         admitted[i] = (health == nullptr) || IsAdmissible((*health)[i]);
     }
 
@@ -24,10 +42,10 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
     {
         using BidMap = OrderBookType<std::greater<PriceTicks>>;
 
-        std::array<BidMap::const_iterator, kVenueCount> it{};
-        std::array<BidMap::const_iterator, kVenueCount> end{};
-        std::array<bool, kVenueCount> active{};
-        for (size_t i = 0; i < kVenueCount; ++i) {
+        std::array<BidMap::const_iterator, kMaxVenues> it{};
+        std::array<BidMap::const_iterator, kMaxVenues> end{};
+        std::array<bool, kMaxVenues> active{};
+        for (size_t i = 0; i < count; ++i) {
             // A venue that is not admitted is simply never made active, so
             // the k-way merge below never looks at it. No branch is added to
             // the inner loop - the exclusion costs nothing per level.
@@ -43,7 +61,7 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
         while (out.bids.size() < max_depth) {
             PriceTicks best = 0;
             bool found = false;
-            for (size_t i = 0; i < kVenueCount; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 if (active[i] && (!found || it[i]->first > best)) {
                     best = it[i]->first;
                     found = true;
@@ -60,11 +78,15 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
             // This level's own quantity is a local: MergedLevel stores only
             // the running total, and LevelQty() recovers the per-level value.
             QtyUnits level_qty = 0;
-            for (size_t i = 0; i < kVenueCount; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 if (active[i] && it[i]->first == best) {
                     const QtyUnits qty = it[i]->second;
                     level_qty += qty;
-                    level.venues[level.venue_count++] = {static_cast<VenueId>(i), qty};
+                    // Attribution IS the loop index: `i` is the slot, and
+                    // VenueQuote now carries a slot rather than a VenueId, so
+                    // there is nothing to look up. The name is resolved once
+                    // at the wire boundary (Core::VenueName), never per level.
+                    level.venues[level.venue_count++] = {static_cast<VenueSlot>(i), qty};
                     ++it[i];
                     active[i] = it[i] != end[i];
                 }
@@ -81,10 +103,10 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
     // cannot share one function without a template. ---
     {
         using AskMap = OrderBookType<std::less<PriceTicks>>;
-        std::array<AskMap::const_iterator, kVenueCount> it{};
-        std::array<AskMap::const_iterator, kVenueCount> end{};
-        std::array<bool, kVenueCount> active{};
-        for (size_t i = 0; i < kVenueCount; ++i) {
+        std::array<AskMap::const_iterator, kMaxVenues> it{};
+        std::array<AskMap::const_iterator, kMaxVenues> end{};
+        std::array<bool, kMaxVenues> active{};
+        for (size_t i = 0; i < count; ++i) {
             if (books[i] && admitted[i]) {
                 it[i] = books[i]->asks().begin();
                 end[i] = books[i]->asks().end();
@@ -97,7 +119,7 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
         while (out.asks.size() < max_depth) {
             PriceTicks best = 0;
             bool found = false;
-            for (size_t i = 0; i < kVenueCount; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 if (active[i] && (!found || it[i]->first < best)) {  // asks: lower is better
                     best = it[i]->first;
                     found = true;
@@ -112,11 +134,15 @@ void MergeBooks(const VenueBookArray& books, Book& out, size_t max_depth, const 
             level.price = best;
 
             QtyUnits level_qty = 0;
-            for (size_t i = 0; i < kVenueCount; ++i) {
+            for (size_t i = 0; i < count; ++i) {
                 if (active[i] && it[i]->first == best) {
                     const QtyUnits qty = it[i]->second;
                     level_qty += qty;
-                    level.venues[level.venue_count++] = {static_cast<VenueId>(i), qty};
+                    // Attribution IS the loop index: `i` is the slot, and
+                    // VenueQuote now carries a slot rather than a VenueId, so
+                    // there is nothing to look up. The name is resolved once
+                    // at the wire boundary (Core::VenueName), never per level.
+                    level.venues[level.venue_count++] = {static_cast<VenueSlot>(i), qty};
                     ++it[i];
                     active[i] = it[i] != end[i];
                 }

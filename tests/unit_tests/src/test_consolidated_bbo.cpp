@@ -34,11 +34,20 @@ BboQuote MakeQuote(VenueId venue, PriceTicks bid_px, QtyUnits bid_qty, PriceTick
     return quote;
 }
 
+// These tests build the quote array directly instead of going through
+// Core::RegisterVenue, so they pick their own slot layout - and they pick
+// slot == VenueId, which keeps every expectation below valid. The helper names
+// that choice once rather than repeating the cast at each call site, and marks
+// the places that would need revisiting if a test ever wants a different
+// layout (DESIGN.md §17.6).
+constexpr VenueSlot SlotOf(VenueId venue) { return static_cast<VenueSlot>(static_cast<size_t>(venue)); }
+
 // Applies a quote the way Core does: store into the array FIRST (the rescan
 // path re-reads it), then fold it in.
 void Apply(VenueQuoteArray& quotes, consolidated::BBO& bbo, const BboQuote& quote) {
-    quotes[static_cast<size_t>(quote.venue)] = quote;
-    consolidated::UpdateBBOWithQuote(bbo, quote, quotes);
+    const VenueSlot slot = SlotOf(quote.venue);
+    quotes[VenueSlotIndex(slot)] = quote;
+    consolidated::UpdateBBOWithQuote(bbo, quote, slot, quotes);
 }
 
 // The incremental path appends venues in arrival order; the full scan
@@ -49,14 +58,14 @@ void ExpectSameVenues(const std::vector<consolidated::VenueQuote>& a, const std:
     auto sorted_a = a;
     auto sorted_b = b;
     auto by_venue = [](const consolidated::VenueQuote& l, const consolidated::VenueQuote& r) {
-        return l.venue < r.venue;
+        return l.slot < r.slot;
     };
     std::sort(sorted_a.begin(), sorted_a.end(), by_venue);
     std::sort(sorted_b.begin(), sorted_b.end(), by_venue);
 
     ASSERT_EQ(sorted_a.size(), sorted_b.size());
     for (size_t i = 0; i < sorted_a.size(); ++i) {
-        EXPECT_EQ(sorted_a[i].venue, sorted_b[i].venue);
+        EXPECT_EQ(sorted_a[i].slot, sorted_b[i].slot);
         EXPECT_EQ(sorted_a[i].qty, sorted_b[i].qty);
     }
 }
@@ -84,7 +93,7 @@ TEST(ConsolidatedBboTest, SingleVenueContributesBBO) {
     EXPECT_EQ(bbo.best_bid.price, 100u);
     EXPECT_EQ(bbo.best_bid.total_qty, 5u);
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BINANCE);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BINANCE));
     EXPECT_EQ(bbo.best_bid.venues[0].qty, 5u);
 
     EXPECT_EQ(bbo.best_ask.price, 101u);
@@ -101,7 +110,7 @@ TEST(ConsolidatedBboTest, HighestBidWinsAcrossVenues) {
     EXPECT_EQ(bbo.best_bid.price, 102u);
     EXPECT_EQ(bbo.best_bid.total_qty, 3u);
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::OKX);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::OKX));
 }
 
 TEST(ConsolidatedBboTest, TiedBidsAtBestPriceAreSummedWithAttribution) {
@@ -165,7 +174,7 @@ TEST(ConsolidatedBboTest, IncrementalSoleBestVenueSteppingDownRescans) {
     EXPECT_EQ(bbo.best_bid.price, 99u);
     EXPECT_EQ(bbo.best_bid.total_qty, 3u);
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::OKX);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::OKX));
 }
 
 // A tied level losing one venue must keep the other - no rescan, no phantom
@@ -183,7 +192,7 @@ TEST(ConsolidatedBboTest, IncrementalTiedLevelLosingOneVenueKeepsTheOther) {
     EXPECT_EQ(bbo.best_bid.price, 100u);
     EXPECT_EQ(bbo.best_bid.total_qty, 3u);  // 8 - Binance's old 5
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::OKX);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::OKX));
 }
 
 // UpdateBBOWithQuote maintains persistent state, so a bug accumulates
@@ -228,7 +237,7 @@ TEST(ConsolidatedBboTest, UnconfiguredVenueSlotIsSkippedNotCrashed) {
     auto bbo = consolidated::ComputeBBO(books);
 
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BYBIT));
 }
 
 // ------------------------------------------------- staleness admission ------
@@ -263,7 +272,7 @@ TEST(ConsolidatedBboTest, FullScanExcludesAStaleVenue) {
 
     EXPECT_EQ(bbo.best_bid.price, 49900u);
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BYBIT));
     EXPECT_EQ(bbo.best_ask.price, 49910u);
 }
 
@@ -276,15 +285,15 @@ TEST(ConsolidatedBboTest, AStaleVenuesOwnQuoteIsTreatedAsNoPrice) {
     const auto health = BboHealth(kStale, kLive, kLive);
 
     quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
-    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], quotes, &health);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], SlotOf(VenueId::BYBIT), quotes, &health);
     ASSERT_EQ(bbo.best_bid.price, 49900u);
 
     // BINANCE is stale and quotes a BETTER bid. It must not take the level.
     quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
-    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BINANCE)], quotes, &health);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BINANCE)], SlotOf(VenueId::BINANCE), quotes, &health);
 
     EXPECT_EQ(bbo.best_bid.price, 49900u) << "a stale venue must not win the best bid";
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BYBIT));
 }
 
 // THE REASON THE RESCAN EXISTS. This test asserts the BROKEN behaviour on
@@ -301,28 +310,28 @@ TEST(ConsolidatedBboTest, IncrementalCannotRemoveAPriceAlreadyFoldedIn) {
     // Both live. BINANCE owns the best bid.
     auto health = BboHealth(kLive, kLive, kLive);
     quotes[static_cast<size_t>(VenueId::BINANCE)] = MakeQuote(VenueId::BINANCE, 50000, 2, 50010, 2);
-    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BINANCE)], quotes, &health);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BINANCE)], SlotOf(VenueId::BINANCE), quotes, &health);
     quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49900, 3, 49910, 3);
-    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], quotes, &health);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], SlotOf(VenueId::BYBIT), quotes, &health);
     ASSERT_EQ(bbo.best_bid.price, 50000u);
-    ASSERT_EQ(bbo.best_bid.venues[0].venue, VenueId::BINANCE);
+    ASSERT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BINANCE));
 
     // BINANCE goes stale. Only BYBIT keeps quoting.
     health = BboHealth(kStale, kLive, kLive);
     quotes[static_cast<size_t>(VenueId::BYBIT)] = MakeQuote(VenueId::BYBIT, 49895, 3, 49905, 3);
-    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], quotes, &health);
+    UpdateBBOWithQuote(bbo, quotes[static_cast<size_t>(VenueId::BYBIT)], SlotOf(VenueId::BYBIT), quotes, &health);
 
     // Asserted deliberately: the incremental path leaves the stale price in
     // place. If this ever starts failing, the incremental path learned to
     // handle transitions and Core's version counter may be removable.
     EXPECT_EQ(bbo.best_bid.price, 50000u) << "incremental filtering alone cannot evict an already-folded price";
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BINANCE);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BINANCE));
 
     // The rescan is what fixes it - this is what Core does on a health change.
     ComputeBBOFromQuotesInto(quotes, bbo, &health);
     EXPECT_EQ(bbo.best_bid.price, 49895u);
     ASSERT_EQ(bbo.best_bid.venues.size(), 1u);
-    EXPECT_EQ(bbo.best_bid.venues[0].venue, VenueId::BYBIT);
+    EXPECT_EQ(bbo.best_bid.venues[0].slot, SlotOf(VenueId::BYBIT));
 }
 
 // The in-place rescan must reuse the caller's buffers rather than replacing

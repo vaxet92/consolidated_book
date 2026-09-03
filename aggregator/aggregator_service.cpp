@@ -134,7 +134,7 @@ grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, cons
 void AggregatorServiceImpl::PublishBbo(InstrumentId instrument, const consolidated::BBO& bbo) {
     wire::Update update;
     FillHeader(update, instrument);
-    *update.mutable_bbo() = ToWire(bbo);
+    *update.mutable_bbo() = ToWire(bbo, venue_wire_table_);
 
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     for (auto& [id, subscription] : sessions_) {
