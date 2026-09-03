@@ -1,5 +1,6 @@
 #include "aggregator_service.h"
 #include "config/config.h"
+#include "latency_recorder.h"
 #include "md_core/md_core.h"
 #include "md_provider/binance/binance_provider.h"
 #include "md_provider/bybit/bybit_provider.h"
@@ -73,9 +74,21 @@ int main(int argc, char* argv[]) {
     // parameterization (§8.4's bands) - Core hands over the shared snapshot
     // and decides nothing about bands; PublishVolumeBands/PublishPriceBands
     // (not built yet) are where per-subscriber band math will happen.
+    // BEFORE-number for DESIGN_1 §14.2 step 12 (per-venue SPSC queues).
+    // Measures provider-stamp to book-published, which is the only span that
+    // means the same thing under both the current mutex handoff and the queues
+    // that will replace it. See latency_recorder.h for why.
+    //
+    // Safe unguarded: PublishBook runs on the calling provider's thread, and
+    // Core::apply_mutex_ already serialises that path. When the SPSC queues
+    // land, publishing moves to the single consolidator thread and it stays
+    // single-threaded for a different reason.
+    LatencyRecorder publish_latency("book_publish", /*report_every=*/1000);
+
     Core core(
         [&service](InstrumentId instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); },
-        [&service](InstrumentId instrument, std::shared_ptr<const consolidated::Book> book) {
+        [&service, &publish_latency](InstrumentId instrument, std::shared_ptr<const consolidated::Book> book) {
+            publish_latency.Record(book->source_mono_ns, book->venue_levels);
             service.PublishBook(instrument, std::move(book));
         });
 
@@ -105,6 +118,17 @@ int main(int argc, char* argv[]) {
         .default_instruments = {InstrumentId::BTCUSDT},
     };
     core.Init(config);
+
+    // Splits ApplyUpdate's cost into lock wait / book apply / merge, so the
+    // live latency can be attributed rather than guessed at. Core is handed
+    // the clock rather than reading one, which is what keeps md_core free of
+    // I/O and of any clock at all.
+    TimingBreakdown timing_breakdown(/*report_every=*/1000);
+    core.SetInstrumentation(&LatencyRecorder::NowMonotonicNs,
+                            [&timing_breakdown](const Core::ApplyTimings& timings) {
+                                timing_breakdown.Record(timings.lock_wait_ns, timings.book_apply_ns, timings.merge_ns,
+                                                        timings.merged_depth, timings.delta_levels);
+                            });
 
     auto on_update = [&core](const BookUpdate& update) { core.ApplyUpdate(update); };
     auto on_quote = [&core](const BboQuote& quote) { core.ApplyQuote(quote); };

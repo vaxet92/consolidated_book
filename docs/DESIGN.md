@@ -440,6 +440,8 @@ ZeroMQ (or any socket transport) inside the aggregator process would serialize a
 
 Splitting each venue adapter into its own process and container *is* a legitimate architecture: one adapter crashing would not take down the others, and each could be restarted independently. It costs serialization on every update, extra latency, and more failure modes. For a single-symbol three-venue aggregator, one process is the right trade. Recorded because the isolation argument is real and wins at larger scale.
 
+**Superseded at production scale — see §17.** This rejection holds for what ships: one symbol, one host, one process, where a socket transport would replace a pointer move and buy nothing. It does not hold for the production question — 24/7 operation, 10–20 instruments, adding a venue without a restart, and providers placed near each exchange. §17 adopts the split and states what it costs. The rejection is kept rather than rewritten because the scope it was decided in is what makes it defensible: the same trade-off has different answers at one symbol and at twenty.
+
 ### 7.4 Backpressure: per-session conflation
 
 **The #1 systems risk is a slow gRPC client back-pressuring the book.** Each session holds a depth-1 pending slot with overwrite semantics: if a new snapshot arrives while the previous write is still in flight, the pending one is replaced, not queued. Nothing upstream ever blocks.
@@ -739,6 +741,8 @@ where `buckets` is how symbols are **grouped**, not how many there are. 100 symb
 
 The trade-off is real: one socket carrying 100 symbols means one parse thread demultiplexing to 100 shards, and that thread becomes the bottleneck. Bucket size is the tuning knob, and it is set by measurement.
 
+**Amended by §17.** §17 places one provider process per `(venue, instrument)`, so connections scale with **both** — the formula above becomes `venues x instruments`, one socket each. That is a deliberate trade: it buys removal semantics (a subscription's lifetime becomes its TCP connection's lifetime, §17.4), at the cost of the socket economy described here. Grouping instruments per provider remains available as a configuration knob, not a redesign; §17.9 gives the number that decides where to set it. Note also that §17.5 carries BBO and depth on **one** connection rather than two, which halves the count in the other direction.
+
 ### 16.3 If provider and core are split across processes
 
 Shared memory beats any socket transport — no serialization, no payload copy, just a slot write and a release store. Three constraints decide whether it is written correctly:
@@ -774,3 +778,5 @@ For crypto specifically this is easier than it sounds — Binance, OKX and Bybit
 ### 16.5 Rejected: splitting internal components into separate services
 
 Already covered in §7.3b and unchanged by the above. A process boundary between provider and core serializes every book update to replace a pointer move. The boundary that *is* needed already exists in the right place: aggregator ↔ clients, over gRPC.
+
+**Superseded at production scale — see §17.** The argument above weighs only latency, and at one symbol on one host it wins. It does not weigh the three things production actually asks for: adding a venue without restarting the merge, removing an instrument without restarting anything, and placing a provider in a different region from the core (§16.4). Each of those needs a process boundary that this section rejects. §17 adopts the split, and §17.10 lists what it costs — including the serialization hop this section correctly identified.

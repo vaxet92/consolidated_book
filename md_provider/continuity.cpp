@@ -43,11 +43,41 @@ ContinuityAction CheckOkxContinuity(const BookUpdate& update, uint64_t& last_seq
 }
 
 ContinuityAction CheckBinanceContinuity(const BookUpdate& update, uint64_t& last_u) {
-    if (static_cast<uint64_t>(update.prev_seq) != last_u + 1) {
-        return ContinuityAction::kGap;
+    // KEY: U and u answer DIFFERENT questions. `prev_seq` (U) is where this
+    // event's coverage STARTS, `seq` (u) is where it ENDS. Continuity is
+    // checked against U and advanced by u, and the two diverge at exactly one
+    // place - the snapshot boundary.
+    //
+    // Requiring U == last_u + 1 assumes events never overlap. That holds in
+    // steady state and is FALSE for the first event after a REST snapshot,
+    // which straddles it: U < lastUpdateId+1 <= u. Binance's own "manage a
+    // local order book" procedure allows exactly that, and rejecting it made
+    // every sync fail on its very next message and resync forever.
+
+    // Entirely inside what we already hold. The WS stream can lag the REST
+    // snapshot, so events older than lastUpdateId keep arriving after we go
+    // live. They are already reflected in the book - drop them rather than
+    // reporting a gap that does not exist.
+    if (update.seq <= last_u) {
+        return ContinuityAction::kIgnore;
     }
-    last_u = update.seq;
-    return ContinuityAction::kApply;
+
+    // Contiguous (U == last_u + 1) or straddling (U < last_u + 1 <= u). Both
+    // apply. `<=` subsumes the steady-state case, so this is simpler than the
+    // equality it replaces, not more permissive in any way that matters:
+    // re-writing a level we already hold is safe because Binance quantities
+    // are ABSOLUTE, not increments.
+    //
+    // The same rule already lives in ReconcileBinanceSnapshot below, which is
+    // how the buffered path got this right while the live path did not.
+    if (static_cast<uint64_t>(update.prev_seq) <= last_u + 1) {
+        last_u = update.seq;
+        return ContinuityAction::kApply;
+    }
+
+    // U > last_u + 1: events between last_u and U were genuinely missed, so
+    // the book is now WRONG rather than merely stale.
+    return ContinuityAction::kGap;
 }
 
 std::optional<size_t> ReconcileBinanceSnapshot(uint64_t last_update_id, const std::vector<BookUpdate>& pending) {

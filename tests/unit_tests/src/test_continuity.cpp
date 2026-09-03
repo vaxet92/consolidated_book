@@ -119,6 +119,84 @@ TEST(ContinuityTest, BinanceSkippedEventIsAGap) {
     EXPECT_EQ(last_u, 100u);
 }
 
+// The bug this file did not catch, for two sessions.
+//
+// The first event after a REST snapshot STRADDLES it: U is BELOW
+// lastUpdateId + 1 while u is above. Binance's own procedure calls that a
+// valid join, and ReconcileBinanceSnapshot below has always accepted it - but
+// the live path required U == last_u + 1 exactly, so every sync succeeded and
+// then failed on its very next message, resyncing forever.
+//
+// Observed live: "depth synced at lastUpdateId=99584596841" followed
+// immediately by "expected U=99584596842, got 99584596810".
+TEST(ContinuityTest, BinanceStraddlingEventAfterSnapshotApplies) {
+    uint64_t last_u = 100;
+    // U = 90 is 11 BELOW last_u + 1, but u = 110 is above it: the event covers
+    // some ids already inside the snapshot plus some new ones.
+    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(110, 90), last_u), ContinuityAction::kApply);
+    EXPECT_EQ(last_u, 110u);
+}
+
+// The WS stream can lag the REST snapshot, so events entirely older than
+// lastUpdateId keep arriving after we go live. They are already reflected in
+// the book - dropping them is right, calling them a gap is not.
+TEST(ContinuityTest, BinanceEventFullyInsideTheSnapshotIsIgnored) {
+    uint64_t last_u = 100;
+    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(95, 90), last_u), ContinuityAction::kIgnore);
+    EXPECT_EQ(last_u, 100u) << "an ignored event must not move the sequence";
+}
+
+// Boundary: u exactly equals last_u. Nothing new, so nothing to apply.
+TEST(ContinuityTest, BinanceEventEndingExactlyAtLastUIsIgnored) {
+    uint64_t last_u = 100;
+    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(100, 95), last_u), ContinuityAction::kIgnore);
+    EXPECT_EQ(last_u, 100u);
+}
+
+// One past the boundary is a real gap and must stay one.
+TEST(ContinuityTest, BinanceOnePastTheJoinIsStillAGap) {
+    uint64_t last_u = 100;
+    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(110, 102), last_u), ContinuityAction::kGap);
+    EXPECT_EQ(last_u, 100u);
+}
+
+// KEY: the two implementations of the SAME rule must agree. Reconcile decides
+// whether a buffered event can join the snapshot; CheckBinanceContinuity
+// decides whether a live one can. They diverged - reconcile accepted the
+// straddle, the live check rejected it - and nothing compared them.
+//
+// This drives one event through both and asserts they reach the same verdict.
+TEST(ContinuityTest, BinanceLiveAndReconcilePathsAgreeOnTheJoinRule) {
+    constexpr uint64_t kLastUpdateId = 100;
+
+    struct Case {
+        uint64_t u;
+        int64_t U;
+        bool joinable;  // what BOTH paths must say
+    };
+    const Case cases[] = {
+        {110, 101, true},   // exactly contiguous
+        {110, 90, true},    // straddling - the case that was broken
+        {110, 101, true},   // join at the boundary
+        {110, 105, false},  // genuine gap
+        {110, 102, false},  // one past the join
+    };
+
+    for (const Case& c : cases) {
+        uint64_t last_u = kLastUpdateId;
+        const auto live = CheckBinanceContinuity(MakeDelta(c.u, c.U), last_u);
+        const std::vector<BookUpdate> pending = {MakeDelta(c.u, c.U)};
+        const auto reconciled = ReconcileBinanceSnapshot(kLastUpdateId, pending);
+
+        const bool live_joins = (live == ContinuityAction::kApply);
+        const bool reconcile_joins = reconciled.has_value() && *reconciled == 0;
+
+        EXPECT_EQ(live_joins, c.joinable) << "live path, u=" << c.u << " U=" << c.U;
+        EXPECT_EQ(reconcile_joins, c.joinable) << "reconcile path, u=" << c.u << " U=" << c.U;
+        EXPECT_EQ(live_joins, reconcile_joins) << "paths disagree, u=" << c.u << " U=" << c.U;
+    }
+}
+
 // ---------------------------------------- Binance snapshot reconciliation ---
 
 TEST(ContinuityTest, BinanceReconcileEmptyBufferAppliesSnapshotAlone) {

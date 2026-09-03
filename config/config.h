@@ -8,6 +8,7 @@
 #include <iostream>
 #include <sstream>
 #include <algorithm>
+#include <array>
 
 // ---------------------------------------------------------------------------
 // REMINDER: venue depth tiers (verified against the live APIs)
@@ -30,7 +31,7 @@
 // Currently hardcoded in the providers, NOT driven by this config:
 //   Binance limit=1000, Bybit orderbook.50, OKX books (400).
 // ---------------------------------------------------------------------------
-inline constexpr std::array<uint32_t, 8> kBinanceDepthTiers = {5, 10, 20};
+inline constexpr std::array<uint32_t, 8> kBinanceDepthTiers = {5, 10, 20, 50, 100, 500, 1000, 5000};
 inline constexpr std::array<uint32_t, 4> kBybitDepthTiers = {1, 50, 200, 1000};
 inline constexpr std::array<uint32_t, 3> kOkxDepthTiers = {1, 5, 400};
 

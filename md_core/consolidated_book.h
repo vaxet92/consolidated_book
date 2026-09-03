@@ -51,6 +51,42 @@ struct Book {
     std::vector<MergedLevel> bids;  // descending price - bids[0] is the best bid
     std::vector<MergedLevel> asks;  // ascending price  - asks[0] is the best ask
 
+    // Monotonic arrival stamp of the update that triggered this merge, copied
+    // straight from BookUpdate::recv_mono_ns.
+    //
+    // KEY: Core does not read a clock - it forwards a number it was given, so
+    // md_core keeps its no-I/O, no-clock rule. The publisher, which is allowed
+    // a clock, subtracts this from its own reading to get the full pipeline
+    // latency: provider parse -> handoff -> book apply -> merge -> published.
+    //
+    // That end-to-end figure is the ONLY fair way to compare the current
+    // mutex handoff against the per-venue SPSC queues (DESIGN_1 §7.2).
+    // Timing ApplyUpdate itself would not work: after the change it becomes a
+    // queue push that returns immediately, which measures work MOVING to
+    // another thread rather than work getting cheaper.
+    //
+    // Not only instrumentation - this is also the honest input for the wire's
+    // server_ts_ns and for answering "how old is this snapshot?".
+    int64_t source_mono_ns = 0;
+
+    // Bid-side depth of each venue's book at the moment of this merge, indexed
+    // by VenueId. Zero for a venue that is not configured.
+    //
+    // Diagnostic first: the live publish latency came in ~10x above what
+    // bench_md_core predicted, and the leading suspect is that the benchmark
+    // modelled 1000-level maps (~16 KB, comfortably in L2) while the real
+    // Binance book grows WITHOUT BOUND - its diff stream reports changes
+    // across a $30,000 price range and nothing trims them. A megabyte-scale
+    // red-black tree turns every `++it` in the merge into a cache miss, and
+    // the merge is ~100% traversal (§7.2).
+    //
+    // Needs no clock, so it costs md_core nothing architecturally - it is read
+    // while the lock is already held, from state already in hand.
+    //
+    // Also the natural input for `VenueStatus` on the wire, which currently
+    // reports no depth at all.
+    std::array<uint32_t, kVenueCount> venue_levels{};
+
     // Clears without releasing capacity, so a Book reused across publishes
     // stops allocating after warm-up (§7.5).
     void Clear() {

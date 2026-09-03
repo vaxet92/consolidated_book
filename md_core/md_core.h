@@ -75,6 +75,33 @@ class Core {
     // never promote one.
     void OnVenueHealth(const VenueHealthEvent& event);
 
+    // Per-update breakdown of where ApplyUpdate's time goes. Diagnostic only.
+    //
+    // Exists because the live publish latency measured ~140-190 us while
+    // bench_md_core predicts ~8-12 us for this work, and three hypotheses for
+    // the gap have already been killed by measurement. One number cannot be
+    // diagnosed; four can.
+    struct ApplyTimings {
+        int64_t lock_wait_ns = 0;   // contention on apply_mutex_
+        int64_t book_apply_ns = 0;  // VenueBook::ApplyUpdate - the delta
+        int64_t merge_ns = 0;       // MergeBooks - the k-way merge
+        uint32_t merged_depth = 0;  // output levels, bid side
+        uint32_t delta_levels = 0;  // levels in the incoming update, both sides
+    };
+
+    // KEY: Core still reads no clock. It calls a function it was GIVEN, so the
+    // no-I/O rule in §2 survives literally rather than by exception - the same
+    // shape as every other seam here (CallBack, BboCallback, BookCallback).
+    //
+    // Null clock disables instrumentation entirely: the cost when unset is one
+    // null check per update, and no timing calls at all.
+    using ClockFn = std::function<int64_t()>;
+    using TimingsCallback = std::function<void(const ApplyTimings&)>;
+    void SetInstrumentation(ClockFn clock, TimingsCallback sink) {
+        clock_ = std::move(clock);
+        timings_callback_ = std::move(sink);
+    }
+
     void Start() {}
     void Stop() {}
 
@@ -129,6 +156,11 @@ class Core {
 
     BboCallback bbo_callback_;
     BookCallback book_callback_;
+
+    // Both null unless SetInstrumentation was called. Read on the hot path,
+    // so the null check is the entire cost in a normal run.
+    ClockFn clock_;
+    TimingsCallback timings_callback_;
     InstrumentBooks venue_books_;
     InstrumentQuotes venue_quotes_;
 

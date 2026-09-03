@@ -27,9 +27,25 @@ void Core::Init(const CoreConfig& config) {
 // Fed by whoever owns the Provider(s) (the wiring layer, e.g. main.cpp).
 // Core has no knowledge of providers, sockets, or threads.
 void Core::ApplyUpdate(const BookUpdate& update) {
+    // Instrumentation is opt-in and off by default; `instrumented` collapses
+    // to a constant-false branch in a normal run.
+    const bool instrumented = static_cast<bool>(clock_);
+    ApplyTimings timings;
+
+    // Sampled BEFORE the lock, so lock_wait_ns captures the time actually
+    // spent blocked on other provider threads. Taking it after would measure
+    // nothing - that is the whole point of splitting this out.
+    const int64_t t_before_lock = instrumented ? clock_() : 0;
+
     // Interim fix (see the comment on apply_mutex_ in md_core.h) - multiple
     // Provider threads can call this concurrently on the same Core.
     std::lock_guard<std::mutex> lock(apply_mutex_);
+
+    const int64_t t_locked = instrumented ? clock_() : 0;
+    if (instrumented) {
+        timings.lock_wait_ns = t_locked - t_before_lock;
+        timings.delta_levels = static_cast<uint32_t>(update.bids.size() + update.asks.size());
+    }
 
     auto venue_it = venue_books_.find(update.instrument);
     if (venue_it == venue_books_.end()) {
@@ -46,6 +62,11 @@ void Core::ApplyUpdate(const BookUpdate& update) {
     }
 
     book_ptr->ApplyUpdate(update);
+
+    const int64_t t_applied = instrumented ? clock_() : 0;
+    if (instrumented) {
+        timings.book_apply_ns = t_applied - t_locked;
+    }
 
     // No bbo_callback_ here on purpose: the fast-BBO stream publishes the
     // BBO (see ApplyQuote). If both paths published, the client's stream
@@ -68,7 +89,36 @@ void Core::ApplyUpdate(const BookUpdate& update) {
         // depth_health_, not bbo_health_ - this is the depth book, and the
         // two streams are separate sockets that fail independently (§6.2d).
         consolidated::MergeBooks(venue_it->second, *merged, consolidated::kDefaultMaxDepth, &depth_health_);
+
+        // Set AFTER MergeBooks: Clear() resets the vectors and the merge knows
+        // nothing about provenance, so this has to be stamped here, by the one
+        // component that holds both the update and the output.
+        //
+        // Carries the ORIGINATING update's arrival time, not "now" - the point
+        // is to measure how long this snapshot took to get here, which
+        // includes the handoff we are about to replace.
+        merged->source_mono_ns = update.recv_mono_ns;
+
+        // Recorded per merge rather than sampled from outside, because a
+        // sample taken from another thread would need this same lock and
+        // would still not correspond to any particular merge.
+        for (size_t i = 0; i < kVenueCount; ++i) {
+            const auto& venue_book = venue_it->second[i];
+            merged->venue_levels[i] = venue_book ? static_cast<uint32_t>(venue_book->bids().size()) : 0;
+        }
+
+        if (instrumented) {
+            // Sampled before book_callback_, so the merge figure is the merge
+            // alone and does not absorb whatever the publisher does.
+            timings.merge_ns = clock_() - t_applied;
+            timings.merged_depth = static_cast<uint32_t>(merged->bids.size());
+        }
+
         book_callback_(update.instrument, merged);
+    }
+
+    if (instrumented && timings_callback_) {
+        timings_callback_(timings);
     }
 }
 
