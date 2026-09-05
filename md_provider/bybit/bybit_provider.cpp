@@ -73,7 +73,7 @@ void BybitProvider::OnDepthMessage(const std::string& message, uint32_t conn_ind
     }
 
     update->recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
-    Emit(*update);
+    Emit(std::move(*update));
 }
 
 void BybitProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {

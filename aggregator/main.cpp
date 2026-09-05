@@ -79,11 +79,11 @@ int main(int argc, char* argv[]) {
     // means the same thing under both the current mutex handoff and the queues
     // that will replace it. See latency_recorder.h for why.
     //
-    // Safe unguarded: PublishBook runs on the calling provider's thread, and
-    // Core::apply_mutex_ already serialises that path. When the SPSC queues
-    // land, publishing moves to the single consolidator thread and it stays
-    // single-threaded for a different reason.
-    LatencyRecorder publish_latency("book_publish", /*report_every=*/1000);
+    // Safe unguarded: PublishBook now runs on the single consolidator thread,
+    // so this recorder is only ever touched by one thread. It used to be safe
+    // for a different reason - Core::apply_mutex_ serialised the provider
+    // threads - and that mutex is gone (§7.2).
+    LatencyRecorder publish_latency("book_publish", /*report_every=*/1000, /*warmup=*/200);
 
     Core core(
         [&service](InstrumentId instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); },
@@ -120,16 +120,18 @@ int main(int argc, char* argv[]) {
     // BTCUSDT with an all-null book array and every update rejected as
     // "unconfigured venue" - silently, with the process otherwise healthy.
     //
-    // Order matters: Core still indexes by VenueId while only the loop bounds
-    // have migrated, so slot N must equal VenueId N. enabled_venues is built
-    // in enum order above, and RegisterVenue refuses if that ever stops
-    // holding rather than misattributing one venue's prices to another.
+    // Slot per venue, kept because every provider's callbacks bind to their
+    // own slot below. Indexed by VenueId purely as a local lookup while
+    // wiring - Core itself never indexes by VenueId again.
+    std::array<std::optional<VenueSlot>, kVenueCount> slot_for_venue{};
     for (VenueId venue : enabled_venues) {
         const std::string venue_name = VenueConverter::ToVenueString(venue);
-        if (!core.RegisterVenue(venue_name).has_value()) {
+        const std::optional<VenueSlot> slot = core.RegisterVenue(venue_name);
+        if (!slot.has_value()) {
             Logger::Log(LogLevel::kError, "[Aggregator] failed to register venue {} - refusing to start", venue_name);
             return 2;
         }
+        slot_for_venue[static_cast<size_t>(venue)] = *slot;
     }
 
     // md_core attributes every level by SLOT and knows no venue names
@@ -155,17 +157,57 @@ int main(int argc, char* argv[]) {
     // live latency can be attributed rather than guessed at. Core is handed
     // the clock rather than reading one, which is what keeps md_core free of
     // I/O and of any clock at all.
-    TimingBreakdown timing_breakdown(/*report_every=*/1000);
+    TimingBreakdown timing_breakdown(/*report_every=*/1000, /*warmup=*/200);
     core.SetInstrumentation(&LatencyRecorder::NowMonotonicNs,
                             [&timing_breakdown](const Core::ApplyTimings& timings) {
                                 timing_breakdown.Record(timings.lock_wait_ns, timings.book_apply_ns, timings.merge_ns,
                                                         timings.merged_depth, timings.delta_levels);
                             });
 
-    auto on_update = [&core](const BookUpdate& update) { core.ApplyUpdate(update); };
-    auto on_quote = [&core](const BboQuote& quote) { core.ApplyQuote(quote); };
+    // Each provider gets callbacks bound to ITS OWN slot, resolved once above
+    // when the venue registered and fixed for the life of the connection
+    // (§17.4 - accept is registration).
+    //
+    // KEY: the slot is captured, not looked up per message. Core no longer
+    // translates VenueId -> slot on the hot path, which removes both an array
+    // read per message and the race that translation would have had against
+    // RegisterVenue once the mutex is gone.
+    //
+    // KEY: these ENQUEUE, they do not apply. The work happens later, on the
+    // consolidator thread. A false return means the queue stayed full for the
+    // whole bounded window - the venue's diff chain is broken and only the
+    // provider can fix it, by resyncing. Ignoring it would leave Core applying
+    // deltas to a book that has silently lost one.
+    auto make_update_sink = [&core](VenueSlot slot, VenueId venue) {
+        return [&core, slot, venue](BookUpdate&& update) {
+            if (!core.EnqueueUpdate(slot, std::move(update))) {
+                Logger::Log(LogLevel::kError, "[{}] core queue full - depth update dropped, resync required",
+                            VenueConverter::ToVenueString(venue));
+                // TODO: call provider->RequestResync() here. The provider owns
+                // resync (§4.2/§9) but is not reachable from this lambda yet -
+                // wiring it needs the provider to exist before its callbacks,
+                // which is the next step, not this one.
+            }
+        };
+    };
+    auto make_quote_sink = [&core](VenueSlot slot) {
+        // No return value: a dropped quote is safe. A quote is a complete
+        // top-of-book snapshot, so the next one supersedes it whole.
+        return [&core, slot](const BboQuote& quote) { core.EnqueueQuote(slot, quote); };
+    };
+    auto make_health_sink = [&core](VenueSlot slot, VenueId venue) {
+        return [&core, slot, venue](const VenueHealthEvent& event) {
+            if (!core.EnqueueHealth(slot, event)) {
+                Logger::Log(LogLevel::kError, "[{}] core queue full - health event dropped, resync required",
+                            VenueConverter::ToVenueString(venue));
+            }
+        };
+    };
 
     std::vector<std::unique_ptr<Provider>> providers;
+    // Parallel to `providers`, so the health callback below can bind each
+    // provider to the slot it registered under.
+    std::vector<VenueSlot> provider_slots;
 
     if (venue_enabled("binance")) {
         ProviderConfig binance_config = {
@@ -184,7 +226,10 @@ int main(int argc, char* argv[]) {
             .depth_backstop_ns = staleness::kBinanceDepthBackstopNs,
             .bbo_backstop_ns = staleness::kBinanceBboBackstopNs,
         };
-        providers.push_back(std::make_unique<BinanceProvider>(binance_config, on_update, on_quote));
+        const VenueSlot slot = *slot_for_venue[static_cast<size_t>(VenueId::BINANCE)];
+        providers.push_back(std::make_unique<BinanceProvider>(binance_config, make_update_sink(slot, VenueId::BINANCE),
+                                                  make_quote_sink(slot)));
+        provider_slots.push_back(slot);
     }
 
     if (venue_enabled("bybit")) {
@@ -200,7 +245,10 @@ int main(int argc, char* argv[]) {
             // with the same `u` every 3s of no change.
             .bbo_backstop_ns = staleness::kBybitBboBackstopNs,
         };
-        providers.push_back(std::make_unique<BybitProvider>(bybit_config, on_update, on_quote));
+        const VenueSlot slot = *slot_for_venue[static_cast<size_t>(VenueId::BYBIT)];
+        providers.push_back(std::make_unique<BybitProvider>(bybit_config, make_update_sink(slot, VenueId::BYBIT),
+                                                  make_quote_sink(slot)));
+        provider_slots.push_back(slot);
     }
 
     if (venue_enabled("okx")) {
@@ -215,7 +263,10 @@ int main(int argc, char* argv[]) {
             .depth_backstop_ns = staleness::kOkxDepthBackstopNs,
             .bbo_backstop_ns = staleness::kOkxBboBackstopNs,
         };
-        providers.push_back(std::make_unique<OKXProvider>(okx_config, on_update, on_quote));
+        const VenueSlot slot = *slot_for_venue[static_cast<size_t>(VenueId::OKX)];
+        providers.push_back(std::make_unique<OKXProvider>(okx_config, make_update_sink(slot, VenueId::OKX),
+                                                  make_quote_sink(slot)));
+        provider_slots.push_back(slot);
     }
 
     // The health seam (DESIGN_1 §6.5). Each provider decides the verdict for
@@ -226,10 +277,17 @@ int main(int argc, char* argv[]) {
     // Same shape as on_update/on_quote above: main.cpp is the only place that
     // knows about both sides, which is what keeps Core free of any knowledge
     // of providers, sockets or threads.
-    auto on_health = [&core](const VenueHealthEvent& event) { core.OnVenueHealth(event); };
-    for (auto& provider : providers) {
-        provider->SetHealthCallback(on_health);
+    for (size_t i = 0; i < providers.size(); ++i) {
+        providers[i]->SetHealthCallback(make_health_sink(provider_slots[i], enabled_venues[i]));
     }
+
+    // The consolidator thread starts HERE: after every venue is registered and
+    // every provider is wired, before any provider opens a socket.
+    //
+    // KEY: registration must be complete first. RegisterVenue mutates state the
+    // consolidator reads with no lock, which is safe only while no consolidator
+    // is running (see Core::Start).
+    core.Start();
 
     for (auto& provider : providers) {
         provider->Start();
@@ -254,6 +312,10 @@ int main(int argc, char* argv[]) {
     for (auto& provider : providers) {
         provider->Stop();
     }
+
+    // After the providers, so nothing is still enqueueing when the
+    // consolidator drains for the last time.
+    core.Stop();
 
     return 0;
 }

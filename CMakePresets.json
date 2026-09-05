@@ -24,6 +24,32 @@
                 "CMAKE_CXX_STANDARD": "20",
                 "CMAKE_BUILD_TYPE": "Debug"
             }
+        },
+        {
+            "name": "vcpkg-arm64-tsan",
+            "displayName": "macOS arm64 + vcpkg thread sanitizer",
+            "generator": "Ninja",
+            "binaryDir": "build_tsan",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "arm64-osx",
+                "CMAKE_CXX_STANDARD": "20",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SANITIZER": "thread"
+            }
+        },
+        {
+            "name": "vcpkg-arm64-asan",
+            "displayName": "macOS arm64 + vcpkg address/UB sanitizer",
+            "generator": "Ninja",
+            "binaryDir": "build_asan",
+            "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_TARGET_TRIPLET": "arm64-osx",
+                "CMAKE_CXX_STANDARD": "20",
+                "CMAKE_BUILD_TYPE": "Debug",
+                "SANITIZER": "address"
+            }
         }
     ],
     "buildPresets": [
@@ -35,6 +61,16 @@
         {
             "name": "vcpkg-arm64-debug",
             "configurePreset": "vcpkg-arm64-debug",
+            "jobs": 0
+        },
+        {
+            "name": "vcpkg-arm64-tsan",
+            "configurePreset": "vcpkg-arm64-tsan",
+            "jobs": 0
+        },
+        {
+            "name": "vcpkg-arm64-asan",
+            "configurePreset": "vcpkg-arm64-asan",
             "jobs": 0
         }
     ]

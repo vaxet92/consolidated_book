@@ -1,8 +1,208 @@
 #include "md_core.h"
+
+#include <variant>
+
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
+
 namespace market_data {
+
+namespace {
+
+// A CPU hint that this thread is spinning: it lets the core back off, saves
+// power, and on SMT hardware releases issue slots to the sibling thread.
+//
+// KEY: this is NOT std::this_thread::yield(). That one is a SYSCALL
+// (sched_yield) that hands the core to the OS scheduler, costing hundreds of
+// nanoseconds and possibly descheduling this thread entirely - unbounded,
+// unpredictable jitter on a path where the whole point is a predictable
+// upper bound. This is a single instruction with no scheduler involvement.
+//
+// The ARM instruction is confusingly also spelled "yield", but it is a
+// hint like x86's PAUSE, not a system call.
+// 64-bit targets only, both of them: __aarch64__ is what this machine and an
+// Apple-Silicon Docker build produce, __x86_64__ is what Docker produces on
+// any Intel/AMD host (Dockerfile pins no platform). 32-bit guards are
+// deliberately absent - this project will not run on them.
+inline void CpuPause() noexcept {
+#if defined(__x86_64__)
+    _mm_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#else
+#error "Unsupported architecture - add a pause primitive for this target"
+#endif
+}
+
+// How many times to retry before applying the overflow policy.
+//
+// NOT MEASURED. This is a bounded-wait constant, not a tuned one: its only
+// job is to give the consumer a brief window to free a slot without ever
+// letting the producer wait without limit. If overflow_count_ is ever
+// non-zero in production, that is the signal to revisit this with data -
+// the counter exists so the question can be answered rather than guessed.
+constexpr int kEnqueueSpinAttempts = 64;
+
+// How many CpuPause iterations the consolidator spins after an empty drain
+// before falling back to sleeping. See the KEY in ConsolidatorLoop for the
+// sizing rule: this must exceed the expected gap between messages, or the
+// consumer sleeps and every message pays the ~37 us wakeup.
+//
+// Sizing, with the measured part separated from the estimated part:
+//   MEASURED: one bare CpuPause is 0.66 ns on this machine (Apple M4, stable
+//   from 10k to 1M iterations). 200k bare pauses would be only ~132 us.
+//   NOT MEASURED: each spin iteration also runs an empty DrainOnce() - a
+//   venue_count() acquire load plus two atomic loads per queue - which
+//   dominates the pause. That puts the real window somewhere in the low
+//   milliseconds, not 132 us, but the per-iteration cost has not been
+//   isolated.
+// The live book_publish median is the check that matters: if it stays near
+// the mutex-era number, the window is long enough and the consumer is not
+// sleeping. If it sits at the +37 us sleep penalty, raise this.
+//
+// Two deliberate settings:
+//   raise toward infinity -> pure pinned-core HFT spin, never sleeps
+//   set to 0              -> sleep immediately, the pre-spin behaviour
+constexpr uint32_t kConsolidatorSpinLimit = 200'000;
+
+// One bounded attempt to hand `message` to the ring. Returns false if the
+// queue stayed full for the whole window; the caller then applies the policy
+// for that message type.
+//
+// KEY: SpscQueue::TryPush checks for space and returns false BEFORE it
+// touches `message`, so a failed attempt leaves it intact and the next
+// iteration re-sends the same object rather than an empty husk. That
+// property is load-bearing here and is covered by
+// SpscQueueTest.TryPushOnFullDoesNotConsumeTheValue.
+[[nodiscard]] bool TryEnqueueBounded(ProviderQueue& queue, ProviderMessage message) {
+    for (int attempt = 0; attempt < kEnqueueSpinAttempts; ++attempt) {
+        if (queue.TryPush(std::move(message))) {
+            return true;
+        }
+        CpuPause();
+    }
+    return false;
+}
+
+}  // namespace
 
 Core::Core(BboCallback bbo_callback, BookCallback book_callback)
     : bbo_callback_(std::move(bbo_callback)), book_callback_(std::move(book_callback)) {}
+
+Core::~Core() { Stop(); }
+
+void Core::Start() {
+    if (running_.exchange(true, std::memory_order_acq_rel)) {
+        return;  // already running - do not spawn a second consolidator
+    }
+    consolidator_ = std::thread([this] { ConsolidatorLoop(); });
+}
+
+void Core::Stop() {
+    if (!running_.exchange(false, std::memory_order_acq_rel)) {
+        return;  // never started, or already stopped
+    }
+
+    // Under the lock so the store to running_ above cannot land between the
+    // consolidator's predicate check and its wait - the classic lost-wakeup
+    // on shutdown, which would hang the join forever.
+    {
+        std::lock_guard<std::mutex> lock(doorbell_mutex_);
+        doorbell_.notify_all();
+    }
+
+    if (consolidator_.joinable()) {
+        consolidator_.join();
+    }
+}
+
+bool Core::HasPending() const {
+    const size_t count = venue_count();
+    for (size_t index = 0; index < count; ++index) {
+        if (!queues_[index].Empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Core::RingDoorbell() {
+    // Fast path: the consolidator is awake and will see this message on its
+    // current or next drain pass, so there is nothing to wake.
+    if (!consumer_waiting_.load(std::memory_order_acquire)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(doorbell_mutex_);
+    doorbell_.notify_one();
+}
+
+void Core::ConsolidatorLoop() {
+    uint32_t idle_spins = 0;
+
+    while (running_.load(std::memory_order_acquire)) {
+        // Drain outside any lock - this does the real work (book apply, merge,
+        // publish callbacks). Holding doorbell_mutex_ across a subscriber
+        // callback would invite a deadlock and would block every producer's
+        // notify for the length of a merge.
+        if (DrainOnce() > 0) {
+            idle_spins = 0;
+            continue;  // more may have arrived while we worked
+        }
+
+        // --- the fast idle path: spin, no mutex, no syscall ----------------
+        //
+        // KEY: this is the whole latency story. Sleeping the moment a drain
+        // comes back empty means the NEXT message has to wake a descheduled
+        // thread - a futex syscall plus a scheduler round trip, MEASURED at
+        // ~37 us of added end-to-end latency (becnhmark_results.md). Spinning
+        // instead costs one CpuPause per iteration and sees the message on the
+        // next poll.
+        //
+        // Sized to be LONGER than the expected gap between messages, which is
+        // what makes the consumer never reach the sleep below under live load:
+        //
+        //   3 venues, spot only        ~240 msg/sec   gap ~4.2 ms
+        //   3 venues, spot + futures   ~480 msg/sec   gap ~2.1 ms
+        //   8 venues, spot + futures  ~1300 msg/sec   gap ~0.8 ms
+        //
+        // (240/sec is measured: ~215 BBO + ~25 depth publishes per second
+        // across three venues. The rest scale from it.)
+        if (idle_spins < kConsolidatorSpinLimit) {
+            ++idle_spins;
+            CpuPause();
+            continue;
+        }
+
+        // --- the dead-feed path: only reached when nothing arrived for the
+        // whole spin window ------------------------------------------------
+        //
+        // Every venue disconnected, or the market genuinely stopped. Sleeping
+        // here is right: a 24/7 process must not pin a core for hours because
+        // a feed is down. Under live load this is unreachable, so the mutex
+        // below is off the message path entirely - producers only touch it
+        // while consumer_waiting_ is true, which live traffic never sets.
+        std::unique_lock<std::mutex> lock(doorbell_mutex_);
+        consumer_waiting_.store(true, std::memory_order_release);
+
+        // The predicate is re-evaluated under the lock, which is what makes a
+        // message pushed between the spin above and this wait impossible to
+        // miss.
+        //
+        // The timeout is a backstop, not the mechanism: if a notify is ever
+        // lost the cost is 50 ms of extra latency on one message rather than a
+        // permanently wedged consolidator.
+        doorbell_.wait_for(lock, std::chrono::milliseconds(50),
+                           [this] { return !running_.load(std::memory_order_acquire) || HasPending(); });
+
+        consumer_waiting_.store(false, std::memory_order_release);
+        idle_spins = 0;
+    }
+
+    // Final drain: whatever the providers already handed over gets applied
+    // rather than silently discarded at shutdown.
+    DrainOnce();
+}
 
 void Core::Init(const CoreConfig& config) {
     // Reserve BEFORE inserting - reserving after the loop is too late, the
@@ -40,20 +240,41 @@ void Core::ApplyUpdate(const BookUpdate& update) {
     // Instrumentation is opt-in and off by default; `instrumented` collapses
     // to a constant-false branch in a normal run.
     const bool instrumented = static_cast<bool>(clock_);
-    ApplyTimings timings;
 
     // Sampled BEFORE the lock, so lock_wait_ns captures the time actually
     // spent blocked on other provider threads. Taking it after would measure
     // nothing - that is the whole point of splitting this out.
     const int64_t t_before_lock = instrumented ? clock_() : 0;
 
-    // Interim fix (see the comment on apply_mutex_ in md_core.h) - multiple
-    // Provider threads can call this concurrently on the same Core.
-    std::lock_guard<std::mutex> lock(apply_mutex_);
+    const int64_t lock_wait_ns = instrumented ? clock_() - t_before_lock : 0;
+
+    // Translate the wire's venue identity into Core's storage index. An
+    // unregistered venue has no slot, so its update is DROPPED - Core never
+    // creates state from a data message (§17.6). This is also the path an
+    // update still in flight when its venue was removed takes.
+    //
+    // Resolved HERE rather than inside ProcessUpdate: once providers carry
+    // their own slot (§17.7) this translation disappears entirely, and the
+    // queued path already skips it - the caller knows its slot for the life
+    // of its connection.
+    const std::optional<VenueSlot> slot = SlotFor(update.venue);
+    if (!slot.has_value()) {
+        Logger::Log(LogLevel::kWarning, "Received update for unregistered venue: {}",
+                    VenueConverter::ToVenueString(update.venue));
+        return;
+    }
+
+    ProcessUpdate(*slot, update, lock_wait_ns);
+}
+
+// Runs with no lock of its own - see the declaration in md_core.h.
+void Core::ProcessUpdate(VenueSlot slot, const BookUpdate& update, int64_t lock_wait_ns) {
+    const bool instrumented = static_cast<bool>(clock_);
+    ApplyTimings timings;
 
     const int64_t t_locked = instrumented ? clock_() : 0;
     if (instrumented) {
-        timings.lock_wait_ns = t_locked - t_before_lock;
+        timings.lock_wait_ns = lock_wait_ns;
         timings.delta_levels = static_cast<uint32_t>(update.bids.size() + update.asks.size());
     }
 
@@ -64,18 +285,7 @@ void Core::ApplyUpdate(const BookUpdate& update) {
         return;
     }
 
-    // Translate the wire's venue identity into Core's storage index. An
-    // unregistered venue has no slot, so its update is DROPPED - Core never
-    // creates state from a data message (§17.6). This is also the path an
-    // update still in flight when its venue was removed takes.
-    const std::optional<VenueSlot> slot = SlotFor(update.venue);
-    if (!slot.has_value()) {
-        Logger::Log(LogLevel::kWarning, "Received update for unregistered venue: {}",
-                    VenueConverter::ToVenueString(update.venue));
-        return;
-    }
-
-    auto& book_ptr = venue_it->second[VenueSlotIndex(*slot)];
+    auto& book_ptr = venue_it->second[VenueSlotIndex(slot)];
     if (!book_ptr) {
         Logger::Log(LogLevel::kWarning, "Received update for unconfigured venue: {}",
                     VenueConverter::ToVenueString(update.venue));
@@ -121,10 +331,16 @@ void Core::ApplyUpdate(const BookUpdate& update) {
         // includes the handoff we are about to replace.
         merged->source_mono_ns = update.recv_mono_ns;
 
-        // Recorded per merge rather than sampled from outside, because a
-        // sample taken from another thread would need this same lock and
-        // would still not correspond to any particular merge.
-        for (size_t i = 0; i < kVenueCount; ++i) {
+        // Recorded per merge rather than sampled from outside: a sample taken
+        // from another thread would not correspond to any particular merge.
+        //
+        // venue_count(), not kVenueCount: this loop was missed by the
+        // venue-slot migration (§17.6) and stopped at 3 while venue_levels is
+        // sized kMaxVenues, so a venue in slot 3 or beyond reported depth 0
+        // forever. Diagnostic-only - it feeds LatencyRecorder's depth report,
+        // never the published book - but it is the same "registers fine, then
+        // never appears" failure the migration existed to remove.
+        for (size_t i = 0; i < venue_count(); ++i) {
             const auto& venue_book = venue_it->second[i];
             merged->venue_levels[i] = venue_book ? static_cast<uint32_t>(venue_book->bids().size()) : 0;
         }
@@ -144,12 +360,136 @@ void Core::ApplyUpdate(const BookUpdate& update) {
     }
 }
 
-void Core::OnVenueHealth(const VenueHealthEvent& event) {
-    // Same lock as the book path: this writes state ApplyUpdate reads, and
-    // arrives on a different provider's thread. Cheap because the event is
-    // edge-triggered - a handful of calls in a healthy run, not per tick.
-    std::lock_guard<std::mutex> lock(apply_mutex_);
+// --- queued path ------------------------------------------------------------
 
+// Counts an overflow and logs only the FIRST one for that slot. Overflow is
+// meant to be rare; if it is not, one line plus a counter says so without
+// the log spam a per-message warning would produce on a path that is by
+// then already failing.
+void Core::NoteOverflow(size_t index, const char* what) {
+    const uint64_t previous = overflow_count_[index].fetch_add(1, std::memory_order_relaxed);
+    if (previous == 0) {
+        Logger::Log(LogLevel::kError, "[Core] slot {} queue full - {} could not be enqueued, resync required", index,
+                    what);
+    }
+}
+
+bool Core::EnqueueUpdate(VenueSlot slot, BookUpdate update) {
+    const size_t index = VenueSlotIndex(slot);
+    if (index >= queues_.size()) {
+        // Only reachable with a fabricated slot - the registry never issues
+        // one past kMaxVenues.
+        Logger::Log(LogLevel::kError, "[Core] EnqueueUpdate: slot {} out of range", index);
+        return false;
+    }
+
+    if (TryEnqueueBounded(queues_[index], ProviderMessage{std::move(update)})) {
+        RingDoorbell();
+        return true;
+    }
+
+    // The diff chain is broken from here on. Core deliberately does NOT
+    // resync itself - it does not own a socket and does not know how this
+    // venue recovers (§9). Reporting the failure is the whole contract; the
+    // provider calls RequestResync().
+    NoteOverflow(index, "depth update");
+    return false;
+}
+
+void Core::EnqueueQuote(VenueSlot slot, BboQuote quote) {
+    const size_t index = VenueSlotIndex(slot);
+    if (index >= queues_.size()) {
+        Logger::Log(LogLevel::kError, "[Core] EnqueueQuote: slot {} out of range", index);
+        return;
+    }
+
+    if (TryEnqueueBounded(queues_[index], ProviderMessage{quote})) {
+        RingDoorbell();
+        return;
+    }
+
+    // Safe to lose: a quote is a complete top-of-book snapshot, so the next
+    // one replaces it whole. Counted, never logged per message - a busy
+    // conflating stream would otherwise be the noisiest thing in the log.
+    quote_drop_count_[index].fetch_add(1, std::memory_order_relaxed);
+}
+
+bool Core::EnqueueHealth(VenueSlot slot, VenueHealthEvent event) {
+    const size_t index = VenueSlotIndex(slot);
+    if (index >= queues_.size()) {
+        Logger::Log(LogLevel::kError, "[Core] EnqueueHealth: slot {} out of range", index);
+        return false;
+    }
+
+    if (TryEnqueueBounded(queues_[index], ProviderMessage{event})) {
+        RingDoorbell();
+        return true;
+    }
+
+    // A transition, not a sample. Losing kStale would leave Core merging a
+    // venue that has gone quiet, indefinitely - the one failure this whole
+    // staleness design exists to prevent.
+    NoteOverflow(index, "health event");
+    return false;
+}
+
+uint64_t Core::OverflowCount(VenueSlot slot) const {
+    const size_t index = VenueSlotIndex(slot);
+    return index < overflow_count_.size() ? overflow_count_[index].load(std::memory_order_relaxed) : 0;
+}
+
+uint64_t Core::QuoteDropCount(VenueSlot slot) const {
+    const size_t index = VenueSlotIndex(slot);
+    return index < quote_drop_count_.size() ? quote_drop_count_[index].load(std::memory_order_relaxed) : 0;
+}
+
+size_t Core::DrainOnce() {
+    // Adding an alternative to ProviderMessage must not silently fall
+    // through the dispatch below - this fails the build and points here.
+    static_assert(std::variant_size_v<ProviderMessage> == 3,
+                  "DrainOnce dispatches exactly three alternatives - handle the new one");
+
+    size_t drained = 0;
+
+    // venue_count(), not kMaxVenues: a message can only be in queue i if
+    // something enqueued to slot i, which requires a slot the registry
+    // issued, so i is always below the high-water mark. Reading it here is
+    // safe against a concurrent RegisterVenue - VenueRegistry::size() is an
+    // acquire load, and a venue registering mid-drain simply gets picked up
+    // on the next pass.
+    const size_t count = venue_count();
+
+    for (size_t index = 0; index < count; ++index) {
+        const VenueSlot slot = static_cast<VenueSlot>(index);
+        ProviderMessage message;
+
+        // Drains this venue fully before moving on. Not starvation: each
+        // ring holds at most kProviderQueueCapacity messages, so a busy
+        // venue can delay a quiet one by a bounded amount. The capacity is
+        // doing the job a per-source read budget would otherwise do
+        // (DESIGN.md §17.6).
+        while (queues_[index].TryPop(message)) {
+            if (auto* update = std::get_if<BookUpdate>(&message)) {
+                // lock_wait_ns = 0: there is no lock on this path. When the
+                // consolidator thread lands, the useful figure here becomes
+                // time spent waiting IN the queue, which is a different
+                // measurement and needs a stamp on the message to compute.
+                ProcessUpdate(slot, *update, /*lock_wait_ns=*/0);
+            } else if (auto* quote = std::get_if<BboQuote>(&message)) {
+                ProcessQuote(slot, *quote);
+            } else if (auto* health = std::get_if<VenueHealthEvent>(&message)) {
+                ProcessHealth(slot, *health);
+            } else {
+                Logger::Log(LogLevel::kError, "[Core] DrainOnce: unhandled message kind {}", message.index());
+            }
+            ++drained;
+        }
+    }
+
+    return drained;
+}
+
+void Core::OnVenueHealth(const VenueHealthEvent& event) {
     // Same translation as ApplyUpdate: the health arrays are indexed by slot,
     // and the event carries a VenueId. A verdict for an unregistered venue has
     // nowhere to go and is discarded rather than written to slot
@@ -158,7 +498,13 @@ void Core::OnVenueHealth(const VenueHealthEvent& event) {
     if (!slot.has_value()) {
         return;
     }
-    const size_t index = VenueSlotIndex(*slot);
+
+    ProcessHealth(*slot, event);
+}
+
+// Runs with no lock of its own - see the declaration in md_core.h.
+void Core::ProcessHealth(VenueSlot slot, const VenueHealthEvent& event) {
+    const size_t index = VenueSlotIndex(slot);
 
     VenueHealthArray& target = (event.stream == StreamKind::kDepth) ? depth_health_ : bbo_health_;
     if (target[index] == event.health) {
@@ -202,15 +548,6 @@ std::shared_ptr<consolidated::Book> Core::AcquireBookBuffer(InstrumentId instrum
 }
 
 void Core::ApplyQuote(const BboQuote& quote) {
-    std::lock_guard<std::mutex> lock(apply_mutex_);
-
-    auto quotes_it = venue_quotes_.find(quote.instrument);
-    if (quotes_it == venue_quotes_.end()) {
-        Logger::Log(LogLevel::kWarning, "Received quote for unknown instrument: {}",
-                    VenueConverter::ToInstrumentString(quote.instrument));
-        return;
-    }
-
     // Same translation as ApplyUpdate. A quote from an unregistered venue is
     // dropped: storing it at static_cast<size_t>(quote.venue) would overwrite
     // whatever venue actually holds that slot, and the BBO would then publish
@@ -221,7 +558,18 @@ void Core::ApplyQuote(const BboQuote& quote) {
                     VenueConverter::ToVenueString(quote.venue));
         return;
     }
-    const VenueSlot slot = *maybe_slot;
+
+    ProcessQuote(*maybe_slot, quote);
+}
+
+// Runs with no lock of its own - see the declaration in md_core.h.
+void Core::ProcessQuote(VenueSlot slot, const BboQuote& quote) {
+    auto quotes_it = venue_quotes_.find(quote.instrument);
+    if (quotes_it == venue_quotes_.end()) {
+        Logger::Log(LogLevel::kWarning, "Received quote for unknown instrument: {}",
+                    VenueConverter::ToInstrumentString(quote.instrument));
+        return;
+    }
 
     // Store BEFORE folding it in: UpdateBBOWithQuote's rescan path re-reads
     // this array, so it must already hold the new quote (see the precondition
@@ -282,8 +630,6 @@ std::optional<VenueSlot> Core::RegisterVenue(std::string_view name) {
         return std::nullopt;
     }
 
-    std::lock_guard<std::mutex> lock(apply_mutex_);
-
     const std::optional<VenueSlot> slot = venue_registry_.Register(name);
     if (!slot.has_value()) {
         Logger::Log(LogLevel::kError, "[Core] RegisterVenue: registry full at {} venues, refusing '{}'", kMaxVenues,
@@ -314,8 +660,6 @@ std::optional<VenueSlot> Core::RegisterVenue(std::string_view name) {
 
 void Core::RemoveVenue(VenueSlot slot) {
     const size_t index = VenueSlotIndex(slot);
-
-    std::lock_guard<std::mutex> lock(apply_mutex_);
 
     if (index >= venue_registry_.size() || !active_venues_[index].has_value()) {
         Logger::Log(LogLevel::kWarning, "[Core] RemoveVenue: slot {} is not active - ignoring", index);

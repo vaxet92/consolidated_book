@@ -83,10 +83,20 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
                     const QtyUnits qty = it[i]->second;
                     level_qty += qty;
                     // Attribution IS the loop index: `i` is the slot, and
-                    // VenueQuote now carries a slot rather than a VenueId, so
+                    // VenueQuote carries a slot rather than a VenueId, so
                     // there is nothing to look up. The name is resolved once
                     // at the wire boundary (Core::VenueName), never per level.
-                    level.venues[level.venue_count++] = {static_cast<VenueSlot>(i), qty};
+                    //
+                    // The bound is provable - the inner loop visits each of
+                    // `count` slots at most once, and count <= kMaxVenues - so
+                    // this guard should never fire. It is here because the
+                    // proof depends on two constants agreeing, and they have
+                    // already disagreed once: overrunning corrupts the next
+                    // MergedLevel in the vector, which is silent, whereas
+                    // losing one level's attribution is visible and bounded.
+                    if (level.venue_count < level.venues.size()) {
+                        level.venues[level.venue_count++] = {static_cast<VenueSlot>(i), qty};
+                    }
                     ++it[i];
                     active[i] = it[i] != end[i];
                 }
@@ -139,10 +149,20 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
                     const QtyUnits qty = it[i]->second;
                     level_qty += qty;
                     // Attribution IS the loop index: `i` is the slot, and
-                    // VenueQuote now carries a slot rather than a VenueId, so
+                    // VenueQuote carries a slot rather than a VenueId, so
                     // there is nothing to look up. The name is resolved once
                     // at the wire boundary (Core::VenueName), never per level.
-                    level.venues[level.venue_count++] = {static_cast<VenueSlot>(i), qty};
+                    //
+                    // The bound is provable - the inner loop visits each of
+                    // `count` slots at most once, and count <= kMaxVenues - so
+                    // this guard should never fire. It is here because the
+                    // proof depends on two constants agreeing, and they have
+                    // already disagreed once: overrunning corrupts the next
+                    // MergedLevel in the vector, which is silent, whereas
+                    // losing one level's attribution is visible and bounded.
+                    if (level.venue_count < level.venues.size()) {
+                        level.venues[level.venue_count++] = {static_cast<VenueSlot>(i), qty};
+                    }
                     ++it[i];
                     active[i] = it[i] != end[i];
                 }

@@ -172,3 +172,195 @@ is a separate change and needs its own number.
   DESIGN.md §17.9 estimates 10 instruments at ~2% of a core from these figures
   and flags that the estimate is optimistic, because the working set grows
   linearly and these loops keep the tree nodes hot.
+
+---
+
+## 2026-09-05 - SPSC queues replace `apply_mutex_` (§14.2 step 12)
+
+Provider threads no longer touch the books. They push a `ProviderMessage` into
+a per-venue SPSC ring; one consolidator thread drains every ring and owns all
+`VenueBook`s. `Core::apply_mutex_` is deleted.
+
+### End-to-end publish latency, live, 1000 samples each
+
+Measured by `LatencyRecorder("book_publish")`: provider stamp
+(`BookUpdate::recv_mono_ns`) to book published. Both runs are the real
+aggregator against Binance/Bybit/OKX at `--depth=100`.
+
+| | mutex (42ea2ae) | queued (no mutex) | change |
+|---|---|---|---|
+| median   | **76.1 us**  | **113.3 us** | **+49%** |
+| p99      | 286.8 us     | 376.1 us     | +31% |
+| max      | 529.7 us     | 1450.4 us    | 2.7x |
+| mean     | 88.1 us      | 122.2 us     | +39% |
+
+Component breakdown, same runs:
+
+| | mutex | queued |
+|---|---|---|
+| `lock_wait` med / p99 / max | 0.1 / 18.2 / 176.8 us | **0.0 / 0.0 / 0.0 us** |
+| `book_apply` med            | 7.6 us  | 7.7 us  |
+| `merge` med                 | 63.1 us | 64.5 us |
+
+### The finding: removing an uncontended mutex made it slower
+
+`book_apply` and `merge` are unchanged - the same `Process*` code runs either
+way - so the entire +37 us is the handoff.
+
+The mutex was **uncontended**: median wait 0.1 us. There was nothing to win.
+What replaced it is a thread handoff: the producer pushes to the ring (~200 ns)
+and then has to WAKE A SLEEPING THREAD, which is a futex syscall plus a
+scheduler round trip - tens of microseconds.
+
+At ~30 messages/sec the consolidator is asleep when almost every message
+arrives, so nearly every message pays that wakeup. DESIGN.md §7.2 argued the
+queue costs "a ~200 ns queue hop"; that is true of the ring itself and ignores
+the wakeup. The ring is cheap. Waking a sleeping thread is not.
+
+This is a LOW-RATE penalty, not a throughput penalty. Under sustained load the
+consolidator stays awake and draining, and the wakeup disappears.
+
+### Why the change was still made
+
+Not for speed. §7.2 chose per-venue SPSC queues so the book path is
+single-threaded: deterministic, testable with fake input, and TSan-clean by
+construction rather than by careful locking. Those properties hold and are
+covered by `CoreQueuedPathTest.QueuedPathMatchesSynchronousPath`, which runs
+the same input through both paths and compares published books level by level,
+including per-level slot attribution.
+
+The cost is 37 us on a path whose slowest venue throttles at 100 ms - three
+orders of magnitude larger.
+
+### Not measured / open
+
+- **Spin before sleeping.** The consolidator currently calls
+  `condvar.wait_for` immediately after an empty drain. A short spin
+  (~20-50 us) before sleeping should catch the "next message is close behind"
+  case without a syscall and recover most of the 37 us. At 30 msg/sec a 50 us
+  spin is ~0.15% of one core. NOT built, NOT measured.
+- The producer-side spin (`kEnqueueSpinAttempts = 64`) only fires when a ring
+  is **full**, which never happened in these runs (`OverflowCount` stayed 0).
+  It protects a path that does not run; the path that runs every message
+  sleeps unconditionally.
+- **Rigour caveat.** These are two live runs at different times against a
+  moving market, not a controlled comparison. `delta_levels` averaged 11.5
+  (mutex) vs 8.0 (queued) and `merged_depth_peak` 850 vs 717. The near-equal
+  `book_apply`/`merge` medians say the workloads were close, but the exact
+  +49% should not be quoted to three digits - the direction and rough
+  magnitude are what hold.
+
+## 2026-09-05 - MergedLevel attribution: out-of-line layout REJECTED
+
+Attribution is 73% of `MergedLevel` and the band walks
+(`FillToNotionalBands`, `FillToBpsBands`) never read it - they read only
+`price`, `cum_qty`, `cum_notional`. Moving it to a packed `Book::attribution`
+array shrank the struct from 176 to 48 bytes (343 KB -> 94 KB for a
+1000-level book, both sides).
+
+`merge_full / iterate_only`, 3-run medians, `iterate_only` as the unchanged
+control:
+
+| layout | `sizeof(MergedLevel)` | ratio | merge |
+|---|---|---|---|
+| inline, `kVenueCount` (3) - the buggy original | 96 B  | 0.92 | ~9.2 us |
+| inline, `kMaxVenues` (8) + bounds guard        | 176 B | **1.07-1.13** | ~11 us |
+| out of line, packed side array                 | 48 B  | 1.57 | ~15.8 us |
+
+**Reverted.** The 3.7x smaller struct cost 40% on the merge.
+`out.attribution.push_back(...)` per contributor costs a size+capacity load, a
+branch, a store to a SECOND write stream, and a size bump - about 3000 times
+per merge. The inline store wins because the level was written microseconds
+ago and is still in L1.
+
+The predicted gain was always in the band walk, and **nothing measures the
+band walk** - `bench_md_core` covers merge and tree traversal only. So the
+loss is measured and the gain is not. Building that benchmark is the only way
+to settle it; until then the inline layout stands.
+
+### The bug that started it (fixed, kept fixed)
+
+`MergedLevel::venues` was `std::array<VenueQuote, kVenueCount>` (3) while the
+merge loop is bounded by Core's runtime venue count, which reaches
+`kMaxVenues` (8). A fourth venue quoting the same price wrote past the end of
+the array into the next `MergedLevel` - silent heap corruption, latent only
+because exactly three venues run. Fixed by sizing the array `kMaxVenues` AND
+adding a runtime bounds guard at the write site, because the two constants had
+already drifted apart once.
+
+## 2026-09-05 - consolidator spins before sleeping
+
+`ConsolidatorLoop` used to call `condvar.wait_for` the moment a drain came
+back empty, so nearly every message had to wake a descheduled thread. It now
+spins (`kConsolidatorSpinLimit` CpuPause iterations) first and only sleeps
+when nothing arrives for the whole window.
+
+Same live measurement as above - `book_publish`, 1000 samples, 3 venues,
+`--depth=100`:
+
+| | mutex (42ea2ae) | queue + sleep | **queue + spin** |
+|---|---|---|---|
+| median | 76.1 us  | 113.3 us | **73.8 us** |
+| p99    | 286.8 us | 376.1 us | 337.7 us |
+| mean   | 88.1 us  | 122.2 us | 114.3 us |
+| max    | 529.7 us | 1450.4 us | **15117 us** |
+| `lock_wait` med/p99 | 0.1 / 18.2 us | 0.0 / 0.0 | 0.0 / 0.0 |
+| `book_apply` med | 7.6 us | 7.7 us | 5.8 us |
+| `merge` med | 63.1 us | 64.5 us | 50.9 us |
+
+**The median regression is gone.** 113.3 -> 73.8 us, marginally better than the
+mutex version, with no lock anywhere on the message path. Under live load the
+consolidator never reaches the sleep, so producers never touch
+`doorbell_mutex_` and the consumer never makes a syscall.
+
+### CPU cost - measured, and lower than expected
+
+~15-20% of one core (process CPU time 28.55s -> 29.16s over 3s wall). NOT the
+100% a permanent spin would cost, because the spin window is finite: during a
+genuine gap it exhausts and the thread sleeps. A dead feed costs ~0%, which is
+the 24/7 requirement.
+
+### The outlier was COLD START - confirmed, then removed
+
+`max` was 15.1 ms with `merge` max at 14.96 ms, 300x the 50 us median. The
+hypothesis was that the first merges are not representative: the Book's level
+vectors grow from empty to ~1500 entries with several reallocations, the book
+buffer pool allocates its first buffer, and the std::map books take a node
+allocation per price for a fresh 1000-level Binance snapshot.
+
+Tested by discarding the first 200 samples (`LatencyRecorder`/
+`TimingBreakdown` now take a `warmup` count, and print how many were
+discarded so nothing goes missing silently):
+
+| | spin, no warmup | spin, warmup=200 |
+|---|---|---|
+| median | 73.8 us | **73.1 us** (unchanged) |
+| p99    | 337.7 us | 400.5 us |
+| max    | **15117 us** | **1304 us** |
+| `merge` max | 14962 us | 1212 us |
+
+**11.6x reduction in max, median unchanged.** The outlier was startup cost, not
+scheduler preemption and not a cost of spinning. The median comparisons in the
+table above are unaffected and stand.
+
+CAVEAT: only this run discards warm-up. The mutex and sleep runs above do not,
+so their maxima are not comparable with this one - they simply did not happen
+to catch a cold-start sample as extreme. Medians across all four runs are
+comparable; maxima are only comparable within the warm-up-discarding runs.
+Re-running the mutex baseline with `warmup` set would fix that and has not
+been done.
+
+### Sizing, and what is measured
+
+- MEASURED: a bare `CpuPause` is **0.66 ns** on this machine (Apple M4, stable
+  from 10k to 1M iterations). 200k bare pauses is ~132 us.
+- NOT MEASURED: each spin iteration also runs an empty `DrainOnce()`, which
+  dominates the pause. The real window is in the low milliseconds; the
+  per-iteration cost has not been isolated.
+- The sizing RULE is what matters: the spin must exceed the expected gap
+  between messages. Measured aggregate input is ~240 msg/sec across 3 venues
+  (~215 BBO + ~25 depth publishes/sec), a ~4.2 ms gap; spot+futures across 8
+  venues would be ~1300 msg/sec, ~0.8 ms. Below the gap, every message pays
+  the ~37 us wakeup; above it, none do.
+- `kConsolidatorSpinLimit` is one knob: raise toward infinity for a pinned-core
+  HFT spin that never sleeps, set to 0 for the sleep-immediately behaviour.

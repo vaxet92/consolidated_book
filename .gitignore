@@ -2,6 +2,7 @@
 build/
 build-debug/
 build-bench/
+build_tsan/
 cmake-build-*/
 out/
 

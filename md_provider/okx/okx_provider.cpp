@@ -93,7 +93,7 @@ void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index
 
     update->recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
 
-    Emit(*update);
+    Emit(std::move(*update));
 }
 
 void OKXProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {

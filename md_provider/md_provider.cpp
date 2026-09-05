@@ -310,7 +310,7 @@ bool Provider::AcceptBbo(uint64_t id, uint32_t conn_index) {
     return true;
 }
 
-void Provider::Emit(BookUpdate& update) {
+void Provider::Emit(BookUpdate&& update) {
     // Stamped here, at the single exit point, rather than in each venue's
     // message handler. Every update that reaches the core carries a
     // monotonic arrival time, or none of them do - there is no way for one
@@ -319,7 +319,7 @@ void Provider::Emit(BookUpdate& update) {
     update.recv_mono_ns = GetMonotonicNs();
 
     if (callback_) {
-        callback_(update);
+        callback_(std::move(update));
     }
 }
 

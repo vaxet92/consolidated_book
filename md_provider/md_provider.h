@@ -64,7 +64,11 @@ struct ProviderConfig {
 
 class Provider {
    public:
-    using CallBack = std::function<void(const BookUpdate&)>;
+    // Takes an rvalue: the update is HANDED OVER, not shown. Core moves it
+    // into its queue, and a BookUpdate owns two vectors - passing by const&
+    // would copy them on every message, which is the allocation the whole
+    // queue design exists to avoid.
+    using CallBack = std::function<void(BookUpdate&&)>;
     using QuoteCallBack = std::function<void(const BboQuote&)>;
 
     // Delivered whenever this venue's verdict for one of its streams CHANGES
@@ -221,7 +225,8 @@ class Provider {
     // means no venue can forget it and no venue can do it differently. A
     // const& would force a copy of the update instead - two vectors, one
     // heap allocation per message, which is what §7.5 rules out.
-    void Emit(BookUpdate& update);
+    // Consumes `update` - the caller must not read it afterwards.
+    void Emit(BookUpdate&& update);
 
     // Called by child classes with a top-of-book quote from the fast-BBO
     // stream. Same threading caveat and same stamping reason as Emit().

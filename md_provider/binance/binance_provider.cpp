@@ -111,12 +111,15 @@ bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
     }
 
     snapshot.recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
-    Emit(snapshot);
+    Emit(std::move(snapshot));
     last_depth_u_ = last_update_id;
 
     for (size_t i = *first; i < pending_.size(); ++i) {
-        Emit(pending_[i]);
+        // seq read BEFORE Emit: Emit consumes the update, and reading a
+        // moved-from object afterwards happens to work only because seq is a
+        // scalar the implicit move leaves alone. Not worth depending on.
         last_depth_u_ = pending_[i].seq;
+        Emit(std::move(pending_[i]));
     }
     pending_.clear();
 
@@ -188,7 +191,7 @@ void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_i
         RequestResync();
         return;
     }
-    Emit(*update);
+    Emit(std::move(*update));
 }
 
 void BinanceProvider::OnBboMessage(const std::string& message, uint32_t conn_index) {

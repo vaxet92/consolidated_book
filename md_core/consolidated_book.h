@@ -21,7 +21,29 @@ namespace consolidated {
 // which is exactly what DESIGN_1 §7.5 rules out on a hot path.
 struct MergedLevel {
     PriceTicks price = 0;
-    std::array<VenueQuote, kVenueCount> venues{};
+
+    // Sized by kMaxVenues, NOT kVenueCount. The merge loop is bounded by
+    // Core's runtime venue count, which reaches kMaxVenues (8) - so an
+    // enum-sized array here (3) meant the FOURTH venue quoting a given price
+    // wrote past the end, corrupting the neighbouring MergedLevel in the
+    // vector. Silent, and latent only because exactly three venues run today.
+    //
+    // KEY: this array's bound and the merge loop's bound are the SAME quantity
+    // and must be written as the same constant. They drifted apart once
+    // already (§17.6 migrated venue_levels and the loop bounds, and missed
+    // this array), which is why the write site also carries a runtime guard
+    // rather than trusting the two to stay in step.
+    //
+    // MEASURED, and the reason this is inline rather than out of line: an
+    // attempt to pack attribution into a side array (MergedLevel 176 -> 48
+    // bytes) made the merge 40% SLOWER - ratio 1.13 -> 1.57, ~11 us -> ~15.8
+    // us. push_back per contributor costs a size+capacity load, a branch, and
+    // a store to a second write stream, ~3000 times per merge; the inline
+    // store wins because this level is already in L1 from being written a
+    // moment ago. The out-of-line layout should only win in the BAND WALK,
+    // which reads none of this - and nothing measures the band walk yet, so
+    // that gain is unproven and the loss is not. See becnhmark_results.md.
+    std::array<VenueQuote, kMaxVenues> venues{};
     uint8_t venue_count = 0;
 
     // Prefix sums, filled during the merge. Computing them here rather than
@@ -36,6 +58,10 @@ struct MergedLevel {
     QtyUnits cum_qty = 0;
     Notional cum_notional = 0;  // running sum of price x qty, RAW scale (x 1e16)
 };
+
+// venue_count is uint8_t, so the venue cap must fit in it. Failing here beats
+// silently wrapping to 0 contributors on a level.
+static_assert(kMaxVenues <= 255, "MergedLevel::venue_count is uint8_t");
 
 // Quantity at `side[index]` alone. Keeps the index-0 boundary condition in
 // one place instead of at every call site.
@@ -99,6 +125,7 @@ struct Book {
         asks.clear();
     }
 };
+
 
 // §5.2: N must cover the deepest question asked - the 50M notional band and
 // the 1000bps price band.

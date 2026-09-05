@@ -15,6 +15,9 @@ add_executable(unit_tests
     src/test_venue_health.cpp
     src/test_venue_registry.cpp
     src/test_core_venue_lifecycle.cpp
+    src/test_spsc_queue.cpp
+    src/test_provider_message.cpp
+    src/test_core_queued_path.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE

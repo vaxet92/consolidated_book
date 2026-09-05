@@ -44,8 +44,21 @@ class LatencyRecorder {
     // `report_every` samples between log lines. At ~30 updates/sec, 1000 is
     // roughly one line every 30 seconds - often enough to watch, rare enough
     // not to become the thing being measured.
-    LatencyRecorder(std::string name, size_t report_every)
-        : name_(std::move(name)), report_every_(report_every) {
+    // `warmup` samples are discarded before any are kept.
+    //
+    // KEY: the first merges after startup are not representative of anything
+    // a running system does. The Book's level vectors are empty and grow to
+    // ~1500 entries with several reallocations, the book buffer pool
+    // allocates its first buffer, and the std::map books take a node
+    // allocation per price for a fresh 1000-level Binance snapshot. All of
+    // that is one-time cost that a live system paid hours ago, and mixing it
+    // into the same distribution puts a multi-millisecond outlier in `max`
+    // that has nothing to do with steady-state latency.
+    //
+    // Discarded rather than reported separately, but COUNTED and printed, so
+    // it is visible that samples were dropped rather than silently missing.
+    LatencyRecorder(std::string name, size_t report_every, size_t warmup = 0)
+        : name_(std::move(name)), report_every_(report_every), warmup_(warmup), warmup_remaining_(warmup) {
         samples_.reserve(report_every_);
     }
 
@@ -84,6 +97,12 @@ class LatencyRecorder {
         // averaged into the distribution.
         if (elapsed < 0) {
             ++negative_;
+            return;
+        }
+
+        if (warmup_remaining_ > 0) {
+            --warmup_remaining_;
+            ++warmed_up_;
             return;
         }
 
@@ -135,9 +154,10 @@ class LatencyRecorder {
 
         Logger::Log(LogLevel::kInfo,
                     "[latency] {} n={} min={:.1f}us median={:.1f}us p99={:.1f}us max={:.1f}us mean={:.1f}us "
-                    "peak_levels[{}] (unstamped={} negative={})",
+                    "peak_levels[{}] (warmup_discarded={} unstamped={} negative={})",
                     name_, n, min / 1000.0, median / 1000.0, p99 / 1000.0, max / 1000.0,
-                    static_cast<double>(sum) / static_cast<double>(n) / 1000.0, peaks, unstamped_, negative_);
+                    static_cast<double>(sum) / static_cast<double>(n) / 1000.0, peaks, warmed_up_, unstamped_,
+                    negative_);
 
         samples_.clear();
     }
@@ -153,6 +173,9 @@ class LatencyRecorder {
    private:
     std::string name_;
     size_t report_every_;
+    size_t warmup_ = 0;
+    size_t warmup_remaining_ = 0;
+    uint64_t warmed_up_ = 0;
     std::vector<int64_t> samples_;
     uint64_t unstamped_ = 0;
     uint64_t negative_ = 0;
@@ -169,11 +192,17 @@ class LatencyRecorder {
 // arithmetic - so this reports each component separately rather than offering
 // a fourth theory.
 //
-// Same threading note as LatencyRecorder: fed from inside Core::ApplyUpdate,
-// which holds apply_mutex_, so the accumulation is already serialised.
+// Same threading note as LatencyRecorder: fed from inside Core's
+// ProcessUpdate, which now runs only on the consolidator thread, so the
+// accumulation is single-threaded. It used to be serialised by apply_mutex_
+// instead; that mutex is gone (§7.2, §14.2 step 12).
 class TimingBreakdown {
    public:
-    explicit TimingBreakdown(size_t report_every) : report_every_(report_every) {
+    // `warmup` samples discarded before any are kept - same reason as
+    // LatencyRecorder: the first merges pay one-time vector growth, pool
+    // allocation and std::map node allocation that a running system does not.
+    explicit TimingBreakdown(size_t report_every, size_t warmup = 0)
+        : report_every_(report_every), warmup_remaining_(warmup) {
         lock_wait_.reserve(report_every_);
         book_apply_.reserve(report_every_);
         merge_.reserve(report_every_);
@@ -181,6 +210,11 @@ class TimingBreakdown {
 
     void Record(int64_t lock_wait_ns, int64_t book_apply_ns, int64_t merge_ns, uint32_t merged_depth,
                 uint32_t delta_levels) {
+        if (warmup_remaining_ > 0) {
+            --warmup_remaining_;
+            return;
+        }
+
         lock_wait_.push_back(lock_wait_ns);
         book_apply_.push_back(book_apply_ns);
         merge_.push_back(merge_ns);
@@ -223,6 +257,7 @@ class TimingBreakdown {
     }
 
     size_t report_every_;
+    size_t warmup_remaining_ = 0;
     std::vector<int64_t> lock_wait_;
     std::vector<int64_t> book_apply_;
     std::vector<int64_t> merge_;
