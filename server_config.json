@@ -1,0 +1,16 @@
+{
+    "venues": [
+        "binance",
+        "bybit",
+        "okx"
+    ],
+    "depth": 500,
+    "instruments": [
+        {
+            "symbol": "BTCUSDT",
+            "market": [
+                "spot"
+            ]
+        }
+    ]
+}

@@ -84,4 +84,10 @@ WORKDIR /app
 COPY --from=builder /src/build/aggregator/aggregator_app ./
 COPY --from=builder /src/build/client/client_app ./
 
+# aggregator_app reads this by a FIXED name (config.h::kConfigFileName) from
+# its working directory - there is no --config= flag to point elsewhere, so
+# it must land at exactly /app/server_config.json. Copied from the build
+# context (not the builder stage): it is data, not something compiled.
+COPY server_config.json ./
+
 EXPOSE 50051

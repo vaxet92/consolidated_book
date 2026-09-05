@@ -32,7 +32,7 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
 BinanceParser::BinanceParser(uint32_t venue_depth) : Parser(venue_depth) {}
 
 std::optional<BookUpdate> BinanceParser::ParseDepthMessage(std::string_view message, VenueId venue,
-                                                           InstrumentId instrument) {
+                                                           InstrumentKey instrument) {
     try {
         ondemand::document doc = parser_.iterate(Load(message));
 
@@ -71,7 +71,7 @@ std::optional<BookUpdate> BinanceParser::ParseDepthMessage(std::string_view mess
 }
 
 std::optional<BookUpdate> BinanceParser::ParseDepthSnapshot(std::string_view body, VenueId venue,
-                                                            InstrumentId instrument) {
+                                                            InstrumentKey instrument) {
     try {
         ondemand::document doc = parser_.iterate(Load(body));
 
@@ -103,7 +103,7 @@ std::optional<BookUpdate> BinanceParser::ParseDepthSnapshot(std::string_view bod
 }
 
 std::optional<BboQuote> BinanceParser::ParseBboMessage(std::string_view message, VenueId venue,
-                                                       InstrumentId instrument) {
+                                                       InstrumentKey instrument) {
     try {
         ondemand::document doc = parser_.iterate(Load(message));
 

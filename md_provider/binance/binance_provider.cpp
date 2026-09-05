@@ -14,15 +14,15 @@ using namespace market_data;
 
 namespace {
 
-std::string ToLowerSymbol(InstrumentId instrument) {
-    std::string symbol = VenueConverter::ToInstrumentString(instrument);
+std::string ToLowerSymbol(InstrumentKey instrument) {
+    std::string symbol = VenueConverter::ToInstrumentString(instrument.Symbol());
     std::transform(symbol.begin(), symbol.end(), symbol.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return symbol;
 }
 
-std::string UpperSymbol(InstrumentId instrument) {
-    return VenueConverter::ToInstrumentString(instrument);
+std::string UpperSymbol(InstrumentKey instrument) {
+    return VenueConverter::ToInstrumentString(instrument.Symbol());
 }
 
 }  // namespace
@@ -56,7 +56,7 @@ void BinanceProvider::FetchSnapshotAsync() {
     std::string host(kBinanceRestHost);
     std::string port(kBinanceRestPort);
     VenueId venue = config.venue_id;
-    InstrumentId instrument = config.instrument;
+    InstrumentKey instrument = config.instrument;
 
     // Detached thread: HttpsGet blocks, and doing that on the io_context
     // thread would stall the read loop that is currently buffering events.

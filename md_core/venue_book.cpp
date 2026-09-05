@@ -4,7 +4,7 @@
 
 namespace market_data {
 
-VenueBook::VenueBook(VenueId venue, InstrumentId instrument) : venue_(venue), instrument_(instrument) {}
+VenueBook::VenueBook(VenueId venue, InstrumentKey instrument) : venue_(venue), instrument_(instrument) {}
 
 std::optional<std::pair<PriceTicks, QtyUnits>> VenueBook::BestBid() const {
     return bids_.empty() ? std::nullopt
@@ -18,7 +18,7 @@ std::optional<std::pair<PriceTicks, QtyUnits>> VenueBook::BestAsk() const {
 VenueId VenueBook::venue() const {
     return venue_;
 }
-InstrumentId VenueBook::instrument() const {
+InstrumentKey VenueBook::instrument() const {
     return instrument_;
 }
 uint64_t VenueBook::last_seq() const {

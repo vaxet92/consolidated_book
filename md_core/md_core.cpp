@@ -216,7 +216,7 @@ void Core::Init(const CoreConfig& config) {
     // because config named one - see md_core.h. config.venues is still read by
     // main.cpp to decide which providers to construct; Core no longer uses it,
     // and it is removed from CoreConfig in a later step.
-    for (InstrumentId instrument : config.default_instruments) {
+    for (InstrumentKey instrument : config.default_instruments) {
         AddInstrument(instrument);
 
         // Reserve the attribution vectors once, so the hot path
@@ -530,7 +530,7 @@ void Core::ProcessHealth(VenueSlot slot, const VenueHealthEvent& event) {
     // which is the right design only after multi-symbol is real (§16.1).
 }
 
-std::shared_ptr<consolidated::Book> Core::AcquireBookBuffer(InstrumentId instrument) {
+std::shared_ptr<consolidated::Book> Core::AcquireBookBuffer(InstrumentKey instrument) {
     auto& pool = book_pools_[instrument];
     for (auto& buffer : pool) {
         if (buffer.use_count() == 1) {
@@ -601,7 +601,7 @@ void Core::ProcessQuote(VenueSlot slot, const BboQuote& quote) {
     }
 }
 
-void Core::AddInstrument(InstrumentId instrument) {
+void Core::AddInstrument(InstrumentKey instrument) {
     // Starts ALL NULL, then fills the slots of venues already registered. An
     // instrument added before any provider has connected is legal and simply
     // publishes nothing until one does - which is the same state a venue that
@@ -697,7 +697,7 @@ void Core::RemoveVenue(VenueSlot slot) {
     Logger::Log(LogLevel::kInfo, "[Core] venue slot {} removed", index);
 }
 
-void Core::RemoveInstrument(InstrumentId instrument) {
+void Core::RemoveInstrument(InstrumentKey instrument) {
     venue_books_.erase(instrument);
     venue_quotes_.erase(instrument);
 }

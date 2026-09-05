@@ -14,7 +14,7 @@ int main() {
 
     market_data::CoreConfig config = {
         .venues = {VenueId::BINANCE, VenueId::BYBIT, VenueId::OKX},
-        .default_instruments = {InstrumentId::BTCUSDT},
+        .default_instruments = {MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot)},
     };
 
     // Null callbacks on purpose: this mock only checks that the three
@@ -35,7 +35,7 @@ int main() {
 
     market_data::ProviderConfig binance_config = {
         .venue_id = VenueId::BINANCE,
-        .instrument = InstrumentId::BTCUSDT,
+        .instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot),
         .host = std::string(kBinanceHost),
         .port = std::string(kBinancePort),
     };
@@ -43,7 +43,7 @@ int main() {
 
     market_data::ProviderConfig bybit_config = {
         .venue_id = VenueId::BYBIT,
-        .instrument = InstrumentId::BTCUSDT,
+        .instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot),
         .host = std::string(kBybitHost),
         .port = std::string(kBybitPort),
     };
@@ -51,7 +51,7 @@ int main() {
 
     market_data::ProviderConfig okx_config = {
         .venue_id = VenueId::OKX,
-        .instrument = InstrumentId::BTCUSDT,
+        .instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot),
         .host = std::string(kOkxHost),
         .port = std::string(kOkxPort),
     };

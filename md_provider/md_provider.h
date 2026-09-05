@@ -20,7 +20,7 @@ namespace market_data {
 
 struct ProviderConfig {
     VenueId venue_id;
-    InstrumentId instrument;  // spot only for now
+    InstrumentKey instrument;  // spot only for now
     std::string host;         // e.g. "stream.binance.com" - venue-specific, but data, not baked into the class
     std::string port;         // e.g. "9443"
 

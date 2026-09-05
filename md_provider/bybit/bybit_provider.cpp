@@ -14,12 +14,12 @@ std::string BybitProvider::DepthSubscriptionMessage() const {
     // Depth is part of the TOPIC NAME on Bybit, not a parameter - already
     // resolved to a published tier (1/50/200/1000) by SelectDepthTier.
     return fmt::format(R"({{"op":"subscribe","args":["orderbook.{}.{}"]}})", config.depth,
-                       VenueConverter::ToInstrumentString(config.instrument));
+                       VenueConverter::ToInstrumentString(config.instrument.Symbol()));
 }
 
 std::string BybitProvider::BboSubscriptionMessage() const {
     return fmt::format(R"({{"op":"subscribe","args":["orderbook.1.{}"]}})",
-                       VenueConverter::ToInstrumentString(config.instrument));
+                       VenueConverter::ToInstrumentString(config.instrument.Symbol()));
 }
 
 void BybitProvider::OnDepthMessage(const std::string& message, uint32_t conn_index) {

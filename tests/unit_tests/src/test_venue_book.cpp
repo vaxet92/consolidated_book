@@ -10,7 +10,7 @@ using namespace market_data;
 namespace {
 
 BookUpdate MakeUpdate(uint64_t seq, bool is_snapshot, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
-    BookUpdate update{VenueId::BINANCE, InstrumentId::BTCUSDT, bids.size(), is_snapshot, seq};
+    BookUpdate update{VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot), bids.size(), is_snapshot, seq};
     update.bids = std::move(bids);
     update.asks = std::move(asks);
     return update;
@@ -59,14 +59,14 @@ void ExpectAsks(const VenueBook& book, const std::vector<PriceLevel>& expected) 
 }  // namespace
 
 TEST(VenueBookTest, EmptyBookHasNoBestBidOrAsk) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     EXPECT_FALSE(book.BestBid().has_value());
     EXPECT_FALSE(book.BestAsk().has_value());
 }
 
 TEST(VenueBookTest, ApplyDeltaInsertsLevelAsBestOfBook) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(1, /*is_snapshot=*/false, {{100, 5}}, {{101, 7}}));
 
@@ -80,7 +80,7 @@ TEST(VenueBookTest, ApplyDeltaInsertsLevelAsBestOfBook) {
 }
 
 TEST(VenueBookTest, ApplyDeltaAtExistingPriceOverwritesQty) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(1, false, {{100, 5}}, {}));
     book.ApplyUpdate(MakeUpdate(2, false, {{100, 9}}, {}));
@@ -90,7 +90,7 @@ TEST(VenueBookTest, ApplyDeltaAtExistingPriceOverwritesQty) {
 }
 
 TEST(VenueBookTest, ZeroQtyDeltaRemovesLevel) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(1, false, {{100, 5}}, {}));
     book.ApplyUpdate(MakeUpdate(2, false, {{100, 0}}, {}));
@@ -99,7 +99,7 @@ TEST(VenueBookTest, ZeroQtyDeltaRemovesLevel) {
 }
 
 TEST(VenueBookTest, SnapshotReplacesEntireBook) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     // Old state: a bid at 100 that the new snapshot will not mention.
     book.ApplyUpdate(MakeUpdate(1, false, {{100, 5}}, {}));
@@ -113,7 +113,7 @@ TEST(VenueBookTest, SnapshotReplacesEntireBook) {
 }
 
 TEST(VenueBookTest, BestBidIsHighestPriceAmongMultipleLevels) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(1, false, {{100, 1}, {102, 1}, {101, 1}}, {}));
 
@@ -122,7 +122,7 @@ TEST(VenueBookTest, BestBidIsHighestPriceAmongMultipleLevels) {
 }
 
 TEST(VenueBookTest, BestAskIsLowestPriceAmongMultipleLevels) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(1, false, {}, {{105, 1}, {103, 1}, {104, 1}}));
 
@@ -135,7 +135,7 @@ TEST(VenueBookTest, BestAskIsLowestPriceAmongMultipleLevels) {
 // book is asserted after every step, and the not-crossed invariant holds
 // throughout.
 TEST(VenueBookTest, SnapshotThenDeltasProducesExactBook) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(100, /*is_snapshot=*/true, {{1000, 10}, {999, 20}, {998, 30}},
                                 {{1001, 15}, {1002, 25}, {1003, 35}}));
@@ -178,7 +178,7 @@ TEST(VenueBookTest, RandomDeltasMatchReferenceModelAndNeverCross) {
     std::uniform_int_distribution<uint64_t> ask_px(1000, 1099);
     std::uniform_int_distribution<uint64_t> qty(0, 9);  // 0 means remove
 
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     std::map<PriceTicks, QtyUnits> ref_bids;
     std::map<PriceTicks, QtyUnits> ref_asks;
 
@@ -219,7 +219,7 @@ TEST(VenueBookTest, RandomDeltasMatchReferenceModelAndNeverCross) {
 }
 
 TEST(VenueBookTest, LastSeqTracksMostRecentlyAppliedUpdate) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     book.ApplyUpdate(MakeUpdate(1, false, {{100, 1}}, {}));
     book.ApplyUpdate(MakeUpdate(2, false, {{100, 2}}, {}));
@@ -238,7 +238,7 @@ TEST(VenueBookTest, LastSeqTracksMostRecentlyAppliedUpdate) {
 // descending, asks ascending) - exactly what the venues send, and the case the
 // hint is meant to make cheap.
 TEST(VenueBookTest, SortedMultiLevelDeltaAppliesEveryLevel) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     std::vector<PriceLevel> bids;
     std::vector<PriceLevel> asks;
@@ -265,7 +265,7 @@ TEST(VenueBookTest, SortedMultiLevelDeltaAppliesEveryLevel) {
 // input, and silently drops updates when the assumption breaks - the worst
 // failure mode available. This test would fail loudly under that design.
 TEST(VenueBookTest, UnsortedMultiLevelDeltaIsStillApplyCorrectly) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     // Deliberately scrambled - neither ascending nor descending.
     const std::vector<PriceLevel> bids = {{950, 5}, {999, 1}, {970, 3}, {990, 2}, {960, 4}};
@@ -296,7 +296,7 @@ TEST(VenueBookTest, UnsortedMultiLevelDeltaIsStillApplyCorrectly) {
 // Interleaving removals with insertions in a single delta is what forces that
 // path; a delta of pure inserts or pure erases would never reach it.
 TEST(VenueBookTest, ErasesInterleavedWithInsertsInOneDelta) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     std::vector<PriceLevel> seed_bids;
     std::vector<PriceLevel> seed_asks;
@@ -334,7 +334,7 @@ TEST(VenueBookTest, ErasesInterleavedWithInsertsInOneDelta) {
 // Deleting a price the book does not hold must be a no-op, not an insertion of
 // a zero-quantity level and not a corrupted hint for what follows.
 TEST(VenueBookTest, EraseOfAbsentPriceDoesNotDisturbTheRest) {
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     const std::vector<PriceLevel> bids = {{999, 0}, {998, 5}, {997, 0}, {996, 7}};
     book.ApplyUpdate(MakeUpdate(1, false, bids, {}));
@@ -356,7 +356,7 @@ TEST(VenueBookTest, RandomMultiLevelDeltasMatchReferenceModel) {
     std::uniform_int_distribution<int> level_count(1, 25);
     std::uniform_int_distribution<int> sorted_coin(0, 1);
 
-    VenueBook book(VenueId::BINANCE, InstrumentId::BTCUSDT);
+    VenueBook book(VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     std::map<PriceTicks, QtyUnits> ref_bids;
     std::map<PriceTicks, QtyUnits> ref_asks;
 

@@ -12,8 +12,8 @@ namespace {
 // OKX uses "BTC-USDT", not "BTCUSDT" - insert a hyphen before the quote
 // currency. Simple and matches every symbol this project uses (all end in
 // USDT).
-std::string ToOkxInstId(InstrumentId instrument) {
-    std::string symbol = VenueConverter::ToInstrumentString(instrument);
+std::string ToOkxInstId(InstrumentKey instrument) {
+    std::string symbol = VenueConverter::ToInstrumentString(instrument.Symbol());
     size_t usdt_pos = symbol.find("USDT");
     if (usdt_pos != std::string::npos) {
         symbol.insert(usdt_pos, "-");

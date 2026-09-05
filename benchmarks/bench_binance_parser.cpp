@@ -57,15 +57,15 @@ int main(int argc, char** argv) {
     BinanceParser parser(/*venue_depth=*/1000);
 
     bench.Measure("depth_small", [&] {
-        auto u = parser.ParseDepthMessage(depth_small, VenueId::BINANCE, InstrumentId::BTCUSDT);
+        auto u = parser.ParseDepthMessage(depth_small, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
         return u ? u->seq + u->bids.size() + u->asks.size() : 0;
     });
     bench.Measure("depth_deep", [&] {
-        auto u = parser.ParseDepthMessage(depth_deep, VenueId::BINANCE, InstrumentId::BTCUSDT);
+        auto u = parser.ParseDepthMessage(depth_deep, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
         return u ? u->seq + u->bids.size() + u->asks.size() : 0;
     });
     bench.Measure("bbo", [&] {
-        auto q = parser.ParseBboMessage(bbo, VenueId::BINANCE, InstrumentId::BTCUSDT);
+        auto q = parser.ParseBboMessage(bbo, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
         return q ? q->seq + q->bid_price + q->ask_price : 0;
     });
 

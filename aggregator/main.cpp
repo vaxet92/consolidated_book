@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <memory>
-#include <string_view>
 #include <vector>
 
 using namespace market_data;
@@ -53,15 +52,58 @@ uint32_t ResolveDepth(VenueId venue, uint32_t desired) {
 }  // namespace
 
 int main(int argc, char* argv[]) {
-    ServerConfig server_config = ServerConfig::ParseFromArgs(argc, argv);
+    // server_config.json is the ONLY session source - no --config= flag, see
+    // config.h::kConfigFileName. The registry lives here, for the life of the
+    // process: everything that needs to turn a symbol string back into an id
+    // (logging, the wire) borrows a reference to this one instance.
+    InstrumentRegistry instrument_registry;
+    const ConfigLoadResult config_result = ServerConfig::LoadFile(std::string(kConfigFileName), instrument_registry);
+    if (!config_result.Ok()) {
+        Logger::Log(LogLevel::kError, "[Aggregator] {}", config_result.error);
+        return 2;
+    }
+    ServerConfig server_config = config_result.config;
+
+    // CLI flags win over the file - the same rule --connections already used
+    // against a config that could not name it, now applied consistently.
+    const CliOverrides overrides = CliOverrides::ParseFromArgs(argc, argv);
+    if (overrides.depth.has_value()) {
+        server_config.depth = *overrides.depth;
+    }
+    if (overrides.connections.has_value()) {
+        server_config.connections = *overrides.connections;
+    }
+    if (overrides.grpc_port.has_value()) {
+        server_config.grpc_port = *overrides.grpc_port;
+    }
+
     if (!server_config.Validate()) {
         return 2;
     }
 
+    // KEY: multi-instrument wiring does not exist yet - ProviderConfig carries
+    // ONE InstrumentKey (md_provider/md_provider.h) and this function builds
+    // one provider per VENUE, not per (venue, instrument). server_config.json
+    // can already LIST several instruments - the parser and Validate() above
+    // impose no such limit - but running with more than one here would
+    // silently wire only the first and drop the rest with no data ever
+    // arriving for them. Refusing loudly is the same choice Validate() already
+    // makes for "futures": a schema ahead of the code that runs it, not a
+    // schema that lies about what runs.
+    if (server_config.instruments.size() != 1 || server_config.instruments.front().markets.size() != 1) {
+        Logger::Log(LogLevel::kError,
+                    "[Aggregator] exactly one instrument naming exactly one market is supported - "
+                    "multi-instrument provider wiring is not implemented yet");
+        return 2;
+    }
+    const InstrumentKey instrument_key =
+        MakeKey(server_config.instruments.front().id, server_config.instruments.front().markets.front());
+
     // connections is worth logging: at N it opens N x venues x 2 sockets, so
     // the number needs to be visible when a venue starts refusing us.
-    Logger::Log(LogLevel::kInfo, "[Aggregator] starting (depth={}, connections={}, grpc_port={})", server_config.depth,
-                server_config.connections, server_config.grpc_port);
+    Logger::Log(LogLevel::kInfo, "[Aggregator] starting (instrument={}, depth={}, connections={}, grpc_port={})",
+                server_config.instruments.front().symbol, server_config.depth, server_config.connections,
+                server_config.grpc_port);
 
     AggregatorServiceImpl service;
 
@@ -86,29 +128,20 @@ int main(int argc, char* argv[]) {
     LatencyRecorder publish_latency("book_publish", /*report_every=*/1000, /*warmup=*/200);
 
     Core core(
-        [&service](InstrumentId instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); },
-        [&service, &publish_latency](InstrumentId instrument, std::shared_ptr<const consolidated::Book> book) {
+        [&service](InstrumentKey instrument, const consolidated::BBO& bbo) { service.PublishBbo(instrument, bbo); },
+        [&service, &publish_latency](InstrumentKey instrument, std::shared_ptr<const consolidated::Book> book) {
             publish_latency.Record(book->source_mono_ns, book->venue_levels);
             service.PublishBook(instrument, std::move(book));
         });
 
-    // --venues= selects which exchanges to run. ParseFromArgs already fills
-    // in all three when the flag is absent, so "empty" here can only mean the
-    // operator named venues we do not recognise - worth refusing rather than
-    // silently starting an aggregator with no data source.
-    auto venue_enabled = [&server_config](std::string_view name) {
-        return std::find(server_config.venues.begin(), server_config.venues.end(), name) != server_config.venues.end();
+    // "venues" in server_config.json selects which exchanges to run.
+    // ParseJson already rejects an unrecognised name and an empty list
+    // (ServerConfig::Validate), so server_config.venues IS the enabled set -
+    // nothing left to re-derive here.
+    const std::vector<VenueId>& enabled_venues = server_config.venues;
+    auto venue_enabled = [&enabled_venues](VenueId venue) {
+        return std::find(enabled_venues.begin(), enabled_venues.end(), venue) != enabled_venues.end();
     };
-
-    std::vector<VenueId> enabled_venues;
-    if (venue_enabled("binance")) enabled_venues.push_back(VenueId::BINANCE);
-    if (venue_enabled("bybit")) enabled_venues.push_back(VenueId::BYBIT);
-    if (venue_enabled("okx")) enabled_venues.push_back(VenueId::OKX);
-
-    if (enabled_venues.empty()) {
-        Logger::Log(LogLevel::kError, "[Aggregator] no recognised venue in --venues (expected binance, bybit, okx),");
-        return 2;
-    }
 
     // Venue registration - the in-process stand-in for the kHello handshake
     // (DESIGN.md §17.4). Core registers no venues from config: a venue exists
@@ -144,12 +177,11 @@ int main(int argc, char* argv[]) {
     // attribution rather than a loud failure. The default is deliberately
     // UNSPECIFIED rather than a real venue, so the failure mode is "no
     // attribution" and never "wrong exchange".
-    service.SetVenueWireTable(
-        MakeVenueWireTable([&core](VenueSlot slot) { return core.VenueName(slot); }));
+    service.SetVenueWireTable(MakeVenueWireTable([&core](VenueSlot slot) { return core.VenueName(slot); }));
 
     CoreConfig config = {
         .venues = enabled_venues,
-        .default_instruments = {InstrumentId::BTCUSDT},
+        .default_instruments = {instrument_key},
     };
     core.Init(config);
 
@@ -158,11 +190,10 @@ int main(int argc, char* argv[]) {
     // the clock rather than reading one, which is what keeps md_core free of
     // I/O and of any clock at all.
     TimingBreakdown timing_breakdown(/*report_every=*/1000, /*warmup=*/200);
-    core.SetInstrumentation(&LatencyRecorder::NowMonotonicNs,
-                            [&timing_breakdown](const Core::ApplyTimings& timings) {
-                                timing_breakdown.Record(timings.lock_wait_ns, timings.book_apply_ns, timings.merge_ns,
-                                                        timings.merged_depth, timings.delta_levels);
-                            });
+    core.SetInstrumentation(&LatencyRecorder::NowMonotonicNs, [&timing_breakdown](const Core::ApplyTimings& timings) {
+        timing_breakdown.Record(timings.lock_wait_ns, timings.book_apply_ns, timings.merge_ns, timings.merged_depth,
+                                timings.delta_levels);
+    });
 
     // Each provider gets callbacks bound to ITS OWN slot, resolved once above
     // when the venue registered and fixed for the life of the connection
@@ -209,10 +240,10 @@ int main(int argc, char* argv[]) {
     // provider to the slot it registered under.
     std::vector<VenueSlot> provider_slots;
 
-    if (venue_enabled("binance")) {
+    if (venue_enabled(VenueId::BINANCE)) {
         ProviderConfig binance_config = {
             .venue_id = VenueId::BINANCE,
-            .instrument = InstrumentId::BTCUSDT,
+            .instrument = instrument_key,
             .host = std::string(kBinanceHost),
             .port = std::string(kBinancePort),
             .depth = ResolveDepth(VenueId::BINANCE, server_config.depth),
@@ -228,14 +259,14 @@ int main(int argc, char* argv[]) {
         };
         const VenueSlot slot = *slot_for_venue[static_cast<size_t>(VenueId::BINANCE)];
         providers.push_back(std::make_unique<BinanceProvider>(binance_config, make_update_sink(slot, VenueId::BINANCE),
-                                                  make_quote_sink(slot)));
+                                                              make_quote_sink(slot)));
         provider_slots.push_back(slot);
     }
 
-    if (venue_enabled("bybit")) {
+    if (venue_enabled(VenueId::BYBIT)) {
         ProviderConfig bybit_config = {
             .venue_id = VenueId::BYBIT,
-            .instrument = InstrumentId::BTCUSDT,
+            .instrument = instrument_key,
             .host = std::string(kBybitHost),
             .port = std::string(kBybitPort),
             .depth = ResolveDepth(VenueId::BYBIT, server_config.depth),
@@ -247,14 +278,14 @@ int main(int argc, char* argv[]) {
         };
         const VenueSlot slot = *slot_for_venue[static_cast<size_t>(VenueId::BYBIT)];
         providers.push_back(std::make_unique<BybitProvider>(bybit_config, make_update_sink(slot, VenueId::BYBIT),
-                                                  make_quote_sink(slot)));
+                                                            make_quote_sink(slot)));
         provider_slots.push_back(slot);
     }
 
-    if (venue_enabled("okx")) {
+    if (venue_enabled(VenueId::OKX)) {
         ProviderConfig okx_config = {
             .venue_id = VenueId::OKX,
-            .instrument = InstrumentId::BTCUSDT,
+            .instrument = instrument_key,
             .host = std::string(kOkxHost),
             .port = std::string(kOkxPort),
             .depth = ResolveDepth(VenueId::OKX, server_config.depth),
@@ -264,8 +295,8 @@ int main(int argc, char* argv[]) {
             .bbo_backstop_ns = staleness::kOkxBboBackstopNs,
         };
         const VenueSlot slot = *slot_for_venue[static_cast<size_t>(VenueId::OKX)];
-        providers.push_back(std::make_unique<OKXProvider>(okx_config, make_update_sink(slot, VenueId::OKX),
-                                                  make_quote_sink(slot)));
+        providers.push_back(
+            std::make_unique<OKXProvider>(okx_config, make_update_sink(slot, VenueId::OKX), make_quote_sink(slot)));
         provider_slots.push_back(slot);
     }
 

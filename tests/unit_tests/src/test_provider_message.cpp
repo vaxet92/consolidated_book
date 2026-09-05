@@ -20,7 +20,7 @@ constexpr size_t kHealthIndex = 2;
 ProviderMessage MakeUpdate(uint64_t seq) {
     BookUpdate update;
     update.venue = VenueId::BYBIT;
-    update.instrument = InstrumentId::BTCUSDT;
+    update.instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
     update.seq = seq;
     return ProviderMessage{std::move(update)};
 }
@@ -28,7 +28,7 @@ ProviderMessage MakeUpdate(uint64_t seq) {
 ProviderMessage MakeQuote(uint64_t seq) {
     BboQuote quote{};
     quote.venue = VenueId::BYBIT;
-    quote.instrument = InstrumentId::BTCUSDT;
+    quote.instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
     quote.seq = seq;
     return ProviderMessage{quote};
 }

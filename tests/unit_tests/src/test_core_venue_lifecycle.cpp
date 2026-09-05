@@ -18,7 +18,7 @@ using namespace market_data;
 
 namespace {
 
-constexpr InstrumentId kInstrument = InstrumentId::BTCUSDT;
+constexpr InstrumentKey kInstrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
 
 // Prices are x1e8, so these are $1000 / $1001 etc. The absolute values do not
 // matter; only their ORDER does, since every assertion below is about which
@@ -40,11 +40,11 @@ constexpr int64_t kMono = 987'654'321'000'000;
 class CoreVenueLifecycleTest : public ::testing::Test {
    protected:
     CoreVenueLifecycleTest()
-        : core_([this](InstrumentId, const consolidated::BBO& bbo) {
+        : core_([this](InstrumentKey, const consolidated::BBO& bbo) {
                     last_bbo_ = bbo;
                     ++bbo_publishes_;
                 },
-                [this](InstrumentId, std::shared_ptr<const consolidated::Book> book) {
+                [this](InstrumentKey, std::shared_ptr<const consolidated::Book> book) {
                     last_book_ = std::move(book);
                     ++book_publishes_;
                 }) {}

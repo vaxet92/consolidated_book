@@ -30,7 +30,7 @@ class OkxParser : public Parser {
     // sends them: asks, bids, ts, checksum (skipped), prevSeqId, seqId.
     // simdjson on-demand is forward-only; reading ts/seqId before bids/asks
     // asserts (not a normal error). test_okx_parser.cpp pins this down.
-    std::optional<BookUpdate> ParseBooksMessage(std::string_view message, VenueId venue, InstrumentId instrument);
+    std::optional<BookUpdate> ParseBooksMessage(std::string_view message, VenueId venue, InstrumentKey instrument);
 
     // One OKX "bbo-tbt" channel message (fast top-of-book, public spot):
     // {"arg","data":[{"asks","bids","ts","seqId"}]}
@@ -39,7 +39,7 @@ class OkxParser : public Parser {
     // no `action` and no `checksum`, so it is a genuinely different shape.
     // Gating on `data` (always present here) keeps the read forward-only.
     // Never throws.
-    std::optional<BookUpdate> ParseBboMessage(std::string_view message, VenueId venue, InstrumentId instrument);
+    std::optional<BookUpdate> ParseBboMessage(std::string_view message, VenueId venue, InstrumentKey instrument);
 };
 
 }  // namespace market_data

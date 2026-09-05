@@ -15,7 +15,7 @@ using OrderBookType = std::map<PriceTicks, QtyUnits, Compare>;
 
 class VenueBook {
    public:
-    VenueBook(VenueId venue, InstrumentId instrument);
+    VenueBook(VenueId venue, InstrumentKey instrument);
 
     void ApplyUpdate(const BookUpdate& update);
 
@@ -23,7 +23,7 @@ class VenueBook {
     std::optional<std::pair<PriceTicks, QtyUnits>> BestAsk() const;
 
     VenueId venue() const;
-    InstrumentId instrument() const;
+    InstrumentKey instrument() const;
     uint64_t last_seq() const;
 
     // Arrival time of the last depth update, on OUR monotonic clock. The
@@ -44,7 +44,7 @@ class VenueBook {
     static void ApplySide(OrderBookType<Compare>& side, const std::vector<PriceLevel>& levels);
 
     VenueId venue_;
-    InstrumentId instrument_;
+    InstrumentKey instrument_;
     uint64_t last_seq_ = 0;
     int64_t last_update_mono_ns_ = 0;  // 0 = never received anything
     OrderBookType<std::greater<PriceTicks>> bids_;  // descending: begin() = best bid

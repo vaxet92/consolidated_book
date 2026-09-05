@@ -32,19 +32,19 @@ class BinanceParser : public Parser {
     // sync reconciliation and the continuity chain need `U`). Returns
     // std::nullopt for non-depth messages (subscribe acks) and for malformed
     // JSON - never throws.
-    std::optional<BookUpdate> ParseDepthMessage(std::string_view message, VenueId venue, InstrumentId instrument);
+    std::optional<BookUpdate> ParseDepthMessage(std::string_view message, VenueId venue, InstrumentKey instrument);
 
     // The REST depth snapshot body from GET /api/v3/depth:
     // {"lastUpdateId": N, "bids": [[px,qty],...], "asks": [[px,qty],...]}.
     // A different shape from depthUpdate (no e/E/U/u), so its own method.
     // Returns is_snapshot = true, seq = lastUpdateId. Never throws.
-    std::optional<BookUpdate> ParseDepthSnapshot(std::string_view body, VenueId venue, InstrumentId instrument);
+    std::optional<BookUpdate> ParseDepthSnapshot(std::string_view body, VenueId venue, InstrumentKey instrument);
 
     // One Binance bookTicker message: {"u","s","b","B","a","A"} - always both
     // sides, no deltas, so a complete BboQuote comes from every message with
     // no carried-over state. `u` is the order-book update ID. Returns
     // std::nullopt for non-bookTicker messages. Never throws.
-    std::optional<BboQuote> ParseBboMessage(std::string_view message, VenueId venue, InstrumentId instrument);
+    std::optional<BboQuote> ParseBboMessage(std::string_view message, VenueId venue, InstrumentKey instrument);
 };
 
 }  // namespace market_data

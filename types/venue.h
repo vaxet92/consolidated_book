@@ -1,14 +1,112 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
-enum class InstrumentId : int16_t {
-    UNKNOWN = -1,
+enum class InstrumentId : uint16_t {
     BTCUSDT = 0,
     ETHUSDT = 1,
     SOLUSDT = 2,
+};
+
+// Spot and futures are DIFFERENT MARKETS that happen to share a symbol. The
+// same "BTCUSDT" trades at different prices with different depth on each, and
+// consolidating across them would produce a book no venue will honour
+// (DESIGN.md §1.3).
+enum class MarketType : uint8_t {
+    kSpot = 0,
+    kFutures = 1,
+};
+
+inline constexpr std::string_view ToMarketString(MarketType market) {
+    return market == MarketType::kSpot ? "spot" : "futures";
+}
+
+// nullopt, not a sentinel enumerator - same reasoning as ToInstrumentId below:
+// there is no "unknown market" in the domain, only a config string that named
+// one incorrectly. The config loader rejects it at the boundary.
+inline constexpr std::optional<MarketType> ToMarketType(std::string_view market) {
+    if (market == "spot") {
+        return MarketType::kSpot;
+    } else if (market == "futures") {
+        return MarketType::kFutures;
+    }
+    return std::nullopt;
+}
+
+// Bit layout of InstrumentKey::packed_:
+//
+//   MSB                                      LSB
+//   +------------------------------+----------+
+//   |          Symbol ID           |  Market  |
+//   |           24 bits            |  8 bits  |
+//   +------------------------------+----------+
+//
+// InstrumentId is uint16_t, so it uses 16 of the 24 symbol bits - room for
+// 65k instruments without touching the layout.
+inline constexpr uint32_t kMarketMask = 0xFF;
+inline constexpr uint32_t kSymbolShift = 8;
+
+// What Core stores books BY. Market type belongs here, on the instrument -
+// NOT on the venue (§16.1: "the shard key is (symbol, market_type) - venue is
+// not part of it").
+//
+// KEY: this is what makes mixing spot and futures IMPOSSIBLE rather than
+// merely forbidden. MergeBooks merges across venue slots within ONE key, so
+// two different keys land in two different VenueBookArrays and can never meet.
+// Had MarketType gone on the venue instead, both would sit in the same merge
+// and correctness would depend on a filter someone has to remember to write.
+//
+// KEY: stored as one packed uint32_t rather than two fields, so the hash is
+// the identity function and equality is a single integer compare. There are
+// no hash collisions between distinct keys by construction - the two fields
+// occupy disjoint bits. `operator==` is still required, because unordered_map
+// reduces hash -> bucket with modulo and distinct hashes still share buckets.
+class InstrumentKey {
+   public:
+    // Needed only so BookUpdate (and therefore ProviderMessage, and therefore
+    // the SPSC ring's slot array) is default-constructible. A default key is
+    // never read: a ring slot is only consumed after a push wrote real data.
+    //
+    // An invalid instrument never reaches this type - a client request naming
+    // one is rejected at the boundary, which is why there is no UNKNOWN case
+    // to encode here.
+    InstrumentKey() noexcept = default;
+
+    constexpr InstrumentKey(InstrumentId symbol, MarketType market) noexcept
+        : packed_((static_cast<uint32_t>(static_cast<uint16_t>(symbol)) << kSymbolShift) |
+                  static_cast<uint32_t>(market)) {}
+
+    explicit constexpr InstrumentKey(uint32_t packed) noexcept : packed_(packed) {}
+
+    constexpr InstrumentId Symbol() const noexcept {
+        return static_cast<InstrumentId>(static_cast<uint16_t>(packed_ >> kSymbolShift));
+    }
+
+    constexpr MarketType Market() const noexcept { return static_cast<MarketType>(packed_ & kMarketMask); }
+
+    constexpr uint32_t Packed() const noexcept { return packed_; }
+
+    constexpr bool operator==(const InstrumentKey&) const noexcept = default;
+
+   private:
+    // Initialised here so the defaulted constructor above is valid and
+    // constexpr-usable; without it the compiler cannot default-construct at
+    // compile time.
+    uint32_t packed_ = 0;
+};
+
+constexpr InstrumentKey MakeKey(InstrumentId symbol, MarketType market) noexcept {
+    return InstrumentKey{symbol, market};
+}
+
+// Identity hash: the key IS its hash, and distinct keys have distinct packed
+// values, so this is perfect for this domain and cheaper than any mixing
+// function.
+struct InstrumentKeyHash {
+    size_t operator()(InstrumentKey key) const noexcept { return key.Packed(); }
 };
 
 enum class VenueId : uint16_t {
@@ -144,7 +242,18 @@ class VenueConverter {
         }
     }
 
-    static inline InstrumentId ToInstrumentId(const std::string& instrument) {
+    // Symbol AND market, e.g. "BTCUSDT:spot". Logs that print only the
+    // symbol cannot tell the two markets apart, which is exactly the confusion
+    // keeping them in separate books exists to prevent.
+    static inline std::string ToInstrumentString(InstrumentKey key) {
+        return ToInstrumentString(key.Symbol()) + ":" + std::string(ToMarketString(key.Market()));
+    }
+
+    // nullopt, not a sentinel enumerator: there is no such thing as an
+    // "unknown instrument" in the domain, only a string that failed to name
+    // one. Callers reject it at the boundary (aggregator_service::Subscribe),
+    // so an invalid instrument never reaches an InstrumentKey or a book.
+    static inline std::optional<InstrumentId> ToInstrumentId(const std::string& instrument) {
         if (instrument == "BTCUSDT") {
             return InstrumentId::BTCUSDT;
         } else if (instrument == "ETHUSDT") {
@@ -152,6 +261,6 @@ class VenueConverter {
         } else if (instrument == "SOLUSDT") {
             return InstrumentId::SOLUSDT;
         }
-        return InstrumentId::UNKNOWN;
+        return std::nullopt;
     }
 };

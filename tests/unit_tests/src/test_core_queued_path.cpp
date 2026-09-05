@@ -20,7 +20,7 @@ using namespace market_data;
 
 namespace {
 
-constexpr InstrumentId kInstrument = InstrumentId::BTCUSDT;
+constexpr InstrumentKey kInstrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
 constexpr PriceTicks kBid = 100'000'000'000;
 constexpr PriceTicks kAsk = 100'100'000'000;
 constexpr QtyUnits kQty = 100'000'000;
@@ -74,14 +74,14 @@ struct Recorder {
     int book_publishes = 0;
 
     Core::BboCallback BboSink() {
-        return [this](InstrumentId, const consolidated::BBO& bbo) {
+        return [this](InstrumentKey, const consolidated::BBO& bbo) {
             last_bbo = bbo;
             ++bbo_publishes;
         };
     }
 
     Core::BookCallback BookSink() {
-        return [this](InstrumentId, std::shared_ptr<const consolidated::Book> book) {
+        return [this](InstrumentKey, std::shared_ptr<const consolidated::Book> book) {
             last_book = std::move(book);
             ++book_publishes;
         };

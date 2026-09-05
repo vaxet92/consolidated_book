@@ -36,7 +36,7 @@ struct PriceLevel {
 struct BookUpdate {
     BookUpdate() = default;
 
-    explicit BookUpdate(const VenueId venue, const InstrumentId instrument, const size_t reserve_levels,
+    explicit BookUpdate(const VenueId venue, const InstrumentKey instrument, const size_t reserve_levels,
                         bool is_snapshot = false, uint64_t seq = 0)
         : venue(venue), instrument(instrument), seq(seq), is_snapshot(is_snapshot) {
         bids.reserve(reserve_levels);
@@ -44,7 +44,11 @@ struct BookUpdate {
     }
 
     VenueId venue{};
-    InstrumentId instrument{};
+    // Carries the MARKET as well as the symbol, so a message is
+    // self-describing: Core routes on it directly and nothing has to
+    // remember which market a given callback was bound to. That matters
+    // more once these are serialised across a process boundary.
+    InstrumentKey instrument{};
     uint64_t seq{};  // venue-native monotonic sequence number
     // Venue-specific continuity field: the sequence this update claims to
     // follow. OKX `prevSeqId` (-1 on a snapshot), Binance `U` (first update
@@ -84,7 +88,7 @@ struct BookUpdate {
 // splicing fast-BBO into the depth book corrupts it (DESIGN_1 §4.4).
 struct BboQuote {
     VenueId venue;
-    InstrumentId instrument;
+    InstrumentKey instrument;
     uint64_t seq{};  // venue-native: Binance `u`, Bybit `seq`, OKX `seqId`
     // Same two-clock split as BookUpdate above, and for the same reasons.
     // The depth and fast-BBO streams are separate sockets, so their
@@ -127,12 +131,12 @@ struct BboQuote {
 // VenueBookArray's pointers, still small enough not to trade correctness for.
 using VenueQuoteArray = std::array<BboQuote, kMaxVenues>;
 
-// Core's own config, typed (VenueId/InstrumentId), not raw strings.
+// Core's own config, typed (VenueId/InstrumentKey), not raw strings.
 // Whoever loads the config file (main.cpp) translates strings to enums
 // once, at the boundary - Core never parses a string.
 struct CoreConfig {
     std::vector<VenueId> venues;                    // which venues are enabled
-    std::vector<InstrumentId> default_instruments;  // subscribed at startup
+    std::vector<InstrumentKey> default_instruments;  // subscribed at startup
 };
 
 }  // namespace market_data

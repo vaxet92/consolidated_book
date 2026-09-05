@@ -19,14 +19,14 @@ BookUpdate MakeSnapshot(std::vector<PriceLevel> bids, std::vector<PriceLevel> as
 }
 
 void SetBook(VenueBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
-    books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, InstrumentId::BTCUSDT);
+    books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     books[static_cast<size_t>(venue)]->ApplyUpdate(MakeSnapshot(std::move(bids), std::move(asks)));
 }
 
 BboQuote MakeQuote(VenueId venue, PriceTicks bid_px, QtyUnits bid_qty, PriceTicks ask_px, QtyUnits ask_qty) {
     BboQuote quote;
     quote.venue = venue;
-    quote.instrument = InstrumentId::BTCUSDT;
+    quote.instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
     quote.bid_price = bid_px;
     quote.bid_qty = bid_qty;
     quote.ask_price = ask_px;

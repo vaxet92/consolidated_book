@@ -93,7 +93,7 @@ constexpr size_t kIsolationDepth = 1000;
 BookUpdate MakeSnapshot(VenueId venue, size_t levels) {
     BookUpdate update{};
     update.venue = venue;
-    update.instrument = InstrumentId::BTCUSDT;
+    update.instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
     update.seq = 1;
     update.is_snapshot = true;
     update.bids.reserve(levels);
@@ -114,7 +114,7 @@ BookUpdate MakeSnapshot(VenueId venue, size_t levels) {
 }
 
 std::unique_ptr<VenueBook> MakeBook(VenueId venue, size_t levels) {
-    auto book = std::make_unique<VenueBook>(venue, InstrumentId::BTCUSDT);
+    auto book = std::make_unique<VenueBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     book->ApplyUpdate(MakeSnapshot(venue, levels));
     return book;
 }
@@ -188,7 +188,7 @@ bool ParseSizeArg(const char* arg, const char* key, size_t& out) {
 BookUpdate MakeQtyUpdate(size_t levels) {
     BookUpdate update{};
     update.venue = VenueId::BINANCE;
-    update.instrument = InstrumentId::BTCUSDT;
+    update.instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
     update.seq = 2;
     update.is_snapshot = false;
     for (size_t i = 0; i < levels; ++i) {
@@ -216,7 +216,7 @@ ChurnDeltas MakeChurn(size_t levels) {
     ChurnDeltas churn;
     for (BookUpdate* update : {&churn.remove, &churn.add}) {
         update->venue = VenueId::BINANCE;
-        update->instrument = InstrumentId::BTCUSDT;
+        update->instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
         update->seq = 3;
         update->is_snapshot = false;
     }
@@ -238,7 +238,7 @@ ChurnDeltas MakeChurn(size_t levels) {
 BboQuote MakeQuote(VenueId venue, PriceTicks bid, PriceTicks ask) {
     BboQuote quote;
     quote.venue = venue;
-    quote.instrument = InstrumentId::BTCUSDT;
+    quote.instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
     quote.bid_price = bid;
     quote.bid_qty = kScaleFactor;
     quote.ask_price = ask;

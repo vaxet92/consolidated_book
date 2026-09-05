@@ -34,11 +34,11 @@ constexpr const char* kBboMessage = R"({
 
 TEST(BinanceParserTest, ParsesDepthUpdateMessage) {
     BinanceParser parser(/*venue_depth=*/20);
-    auto update = parser.ParseDepthMessage(kDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    auto update = parser.ParseDepthMessage(kDepthMessage, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     ASSERT_TRUE(update.has_value());
     EXPECT_EQ(update->venue, VenueId::BINANCE);
-    EXPECT_EQ(update->instrument, InstrumentId::BTCUSDT);
+    EXPECT_EQ(update->instrument, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_FALSE(update->is_snapshot);
     EXPECT_EQ(update->seq, 160u);
     EXPECT_EQ(update->exch_ts_ns, 1672515782136LL * kTsNsMultiplier);
@@ -54,23 +54,23 @@ TEST(BinanceParserTest, ParsesDepthUpdateMessage) {
 
 TEST(BinanceParserTest, IgnoresNonDepthUpdateMessages) {
     BinanceParser parser(/*venue_depth=*/20);
-    auto update = parser.ParseDepthMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    auto update = parser.ParseDepthMessage(kNonDepthMessage, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(BinanceParserTest, DepthMalformedJsonReturnsNulloptNotACrash) {
     BinanceParser parser(/*venue_depth=*/20);
-    auto update = parser.ParseDepthMessage("{not valid json", VenueId::BINANCE, InstrumentId::BTCUSDT);
+    auto update = parser.ParseDepthMessage("{not valid json", VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(BinanceParserTest, ParsesBookTickerMessage) {
     BinanceParser parser(/*venue_depth=*/20);
-    auto quote = parser.ParseBboMessage(kBboMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    auto quote = parser.ParseBboMessage(kBboMessage, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     ASSERT_TRUE(quote.has_value());
     EXPECT_EQ(quote->venue, VenueId::BINANCE);
-    EXPECT_EQ(quote->instrument, InstrumentId::BTCUSDT);
+    EXPECT_EQ(quote->instrument, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_EQ(quote->seq, 400900217u);           // the `u` field
     EXPECT_EQ(quote->bid_price, 2535190000ull);  // 25.35190000 * 1e8
     EXPECT_EQ(quote->bid_qty, 3121000000ull);    // 31.21000000 * 1e8
@@ -80,6 +80,6 @@ TEST(BinanceParserTest, ParsesBookTickerMessage) {
 
 TEST(BinanceParserTest, IgnoresNonBookTickerMessages) {
     BinanceParser parser(/*venue_depth=*/20);
-    auto quote = parser.ParseBboMessage(kNonDepthMessage, VenueId::BINANCE, InstrumentId::BTCUSDT);
+    auto quote = parser.ParseBboMessage(kNonDepthMessage, VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_FALSE(quote.has_value());
 }

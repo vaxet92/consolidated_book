@@ -30,7 +30,7 @@ class BybitParser : public Parser {
     // type, ts, then inside data: u, b, a). simdjson on-demand is a single
     // forward pass; reordering these reads crashes (assertion), not just
     // misparses. test_bybit_parser.cpp pins this down against a real sample.
-    std::optional<BookUpdate> ParseOrderbookMessage(std::string_view message, VenueId venue, InstrumentId instrument);
+    std::optional<BookUpdate> ParseOrderbookMessage(std::string_view message, VenueId venue, InstrumentKey instrument);
 };
 
 }  // namespace market_data

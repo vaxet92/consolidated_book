@@ -12,11 +12,11 @@ namespace {
 constexpr VenueSlot SlotOf(VenueId venue) { return static_cast<VenueSlot>(static_cast<size_t>(venue)); }
 
 void SetBook(VenueBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
-    BookUpdate update{venue, InstrumentId::BTCUSDT, bids.size(), true, 1};
+    BookUpdate update{venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot), bids.size(), true, 1};
     update.bids = std::move(bids);
     update.asks = std::move(asks);
 
-    books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, InstrumentId::BTCUSDT);
+    books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     books[static_cast<size_t>(venue)]->ApplyUpdate(update);
 }
 

@@ -2,13 +2,18 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <map>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
 #include <array>
+
+#include "types/venue.h"
+#include "types/instrument_registry.h"
 
 // ---------------------------------------------------------------------------
 // REMINDER: venue depth tiers (verified against the live APIs)
@@ -76,9 +81,35 @@ inline constexpr uint32_t kDefaultConnections = 1;
 // --connections=300 cannot open 1800 sockets and get the IP banned.
 inline constexpr uint32_t kMaxConnections = 8;
 
+// The session config is always this file, in the working directory. There is
+// no --config= flag: one hardcoded name means there is no second place an
+// operator could point it and get confused about which file actually ran.
+inline constexpr std::string_view kConfigFileName = "server_config.json";
+
+// One "instruments[]" entry from the config file, after its symbol has been
+// registered.
+//
+// `markets` is a list, not a single MarketType, because one config entry can
+// name several: {"symbol": "BTCUSDT", "market": ["spot", "futures"]}. The
+// symbol is registered ONCE - the registry does not know about markets, only
+// about names (types/instrument_registry.h) - and this struct is what turns
+// that one id back into N independent InstrumentKeys, one per market. Spot and
+// futures never share a key, so they can never meet in a merge (venue.h).
+struct InstrumentEntry {
+    InstrumentId id;
+    std::string symbol;  // canonical form, as returned by InstrumentRegistry::Name
+    std::vector<MarketType> markets;
+};
+
+// Forward-declared only: ServerConfig::ParseJson/LoadFile return
+// ConfigLoadResult by value below, which just needs the NAME here - the
+// definition, which needs ServerConfig complete, comes after ServerConfig
+// itself.
+struct ConfigLoadResult;
+
 struct ServerConfig {
-    std::vector<std::string> venues;       // binance, bybit, okx
-    std::vector<std::string> instruments;  // BTCUSDT, ETHUSDT, SOLUSDT
+    std::vector<VenueId> venues;
+    std::vector<InstrumentEntry> instruments;
     int grpc_port = 50051;
 
     // Desired per-venue book depth. Each venue rounds UP to its nearest tier
@@ -102,9 +133,48 @@ struct ServerConfig {
     // cost does not scale with N.
     uint32_t connections = kDefaultConnections;
 
-    // Parse from command line arguments
-    static ServerConfig ParseFromArgs(int argc, char* argv[]);
+    // Parses a config document already in memory. No file access here - the
+    // caller reads the file (or, in a test, supplies a literal string), which
+    // is what makes this testable without touching a filesystem.
+    //
+    // `registry` is populated as a side effect: every instruments[].symbol is
+    // registered, so every InstrumentEntry::id it returns is already valid to
+    // look up. Passed by reference, not returned, because InstrumentRegistry
+    // holds a std::atomic and cannot be copied or moved out of this call.
+    static ConfigLoadResult ParseJson(std::string_view json, InstrumentRegistry& registry);
+
+    // Reads `path` and calls ParseJson. A missing or unreadable file reports
+    // through the same ConfigLoadResult::error as a malformed one - the
+    // operator sees "config:" and the reason either way, never a crash.
+    static ConfigLoadResult LoadFile(const std::string& path, InstrumentRegistry& registry);
 
     // Validate configuration
     bool Validate() const;
+};
+
+// What a config load produced, success or not.
+//
+// `config` is meaningless when `error` is non-empty - callers must check
+// Ok() before reading it. A pair of out-params (bool + ServerConfig&) would
+// let a caller forget the check; returning them bundled does not.
+struct ConfigLoadResult {
+    ServerConfig config;
+    std::string error;  // empty means success
+
+    bool Ok() const { return error.empty(); }
+};
+
+// Command-line flags, now overrides ONLY. venues and instruments come from
+// server_config.json exclusively - there is no --venues=/--instruments=
+// and no --config= either, so there is no second place that can define the
+// active symbol set, or point at a different file, and disagree with it.
+struct CliOverrides {
+    // std::optional, not a value with a sentinel: "not passed on the command
+    // line" and "passed as zero" must stay distinguishable, or a caller could
+    // never tell whether to keep the file's value or overwrite it with zero.
+    std::optional<uint32_t> depth;
+    std::optional<uint32_t> connections;
+    std::optional<int> grpc_port;
+
+    static CliOverrides ParseFromArgs(int argc, char* argv[]);
 };

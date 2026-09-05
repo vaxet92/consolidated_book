@@ -22,13 +22,16 @@
 
 namespace market_data {
 
-using InstrumentBooks = std::unordered_map<InstrumentId, VenueBookArray>;
-using InstrumentQuotes = std::unordered_map<InstrumentId, VenueQuoteArray>;
-using InstrumentBbo = std::unordered_map<InstrumentId, consolidated::BBO>;
+// Keyed by InstrumentKey, so spot and futures for the same symbol are
+// different entries and their books can never be merged together (§1.3).
+// InstrumentKeyHash is the identity on the packed uint32_t.
+using InstrumentBooks = std::unordered_map<InstrumentKey, VenueBookArray, InstrumentKeyHash>;
+using InstrumentQuotes = std::unordered_map<InstrumentKey, VenueQuoteArray, InstrumentKeyHash>;
+using InstrumentBbo = std::unordered_map<InstrumentKey, consolidated::BBO, InstrumentKeyHash>;
 
 class Core {
    public:
-    using BboCallback = std::function<void(InstrumentId, const consolidated::BBO&)>;
+    using BboCallback = std::function<void(InstrumentKey, const consolidated::BBO&)>;
 
     // Fired after every depth update with a fresh, immutable merged book.
     // shared_ptr, not a reference: fan-out to N subscribers is N refcount
@@ -38,7 +41,7 @@ class Core {
     // bands to compute from it, for whom, is the subscriber's job (the
     // aggregator service), which is what makes per-client custom thresholds
     // (§8.4) possible without Core knowing about clients at all.
-    using BookCallback = std::function<void(InstrumentId, std::shared_ptr<const consolidated::Book>)>;
+    using BookCallback = std::function<void(InstrumentKey, std::shared_ptr<const consolidated::Book>)>;
 
     explicit Core(BboCallback bbo_callback, BookCallback book_callback);
 
@@ -316,8 +319,8 @@ class Core {
     // config. The two directions have to stay in sync - a new instrument gets
     // books for the venues already registered, and a newly registered venue
     // gets books for the instruments that already exist.
-    void AddInstrument(InstrumentId instrument);
-    void RemoveInstrument(InstrumentId instrument);
+    void AddInstrument(InstrumentKey instrument);
+    void RemoveInstrument(InstrumentKey instrument);
 
     // --- the work itself, with no lock and no venue translation -------------
     //
@@ -496,7 +499,7 @@ class Core {
     // the BBO is per INSTRUMENT: one venue going stale invalidates every
     // instrument's BBO, and a counter says so without iterating them.
     uint64_t bbo_health_version_ = 0;
-    std::unordered_map<InstrumentId, uint64_t> bbo_health_version_seen_;
+    std::unordered_map<InstrumentKey, uint64_t, InstrumentKeyHash> bbo_health_version_seen_;
 
     BboCallback bbo_callback_;
     BookCallback book_callback_;
@@ -523,12 +526,13 @@ class Core {
     // structures without a measured reason). "Assume no slow subscriber" -
     // if that assumption breaks, the pool simply grows by one buffer rather
     // than corrupting anything.
-    std::unordered_map<InstrumentId, std::vector<std::shared_ptr<consolidated::Book>>> book_pools_;
+    std::unordered_map<InstrumentKey, std::vector<std::shared_ptr<consolidated::Book>>, InstrumentKeyHash>
+        book_pools_;
 
     // Returns a Book buffer for `instrument` that no subscriber currently
     // holds, reusing one from the pool if possible. Not thread-safe on its
     // own - called only on the consolidator thread.
-    std::shared_ptr<consolidated::Book> AcquireBookBuffer(InstrumentId instrument);
+    std::shared_ptr<consolidated::Book> AcquireBookBuffer(InstrumentKey instrument);
 };
 
 }  // namespace market_data

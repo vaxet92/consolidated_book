@@ -9,7 +9,7 @@ namespace {
 // Continuity checks only read seq / prev_seq / is_snapshot, so venue and
 // instrument are fixed here - they do not affect the result.
 BookUpdate MakeDelta(uint64_t seq, int64_t prev_seq = 0) {
-    BookUpdate update{VenueId::BINANCE, InstrumentId::BTCUSDT, /*reserve_levels=*/0, /*is_snapshot=*/false, seq};
+    BookUpdate update{VenueId::BINANCE, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot), /*reserve_levels=*/0, /*is_snapshot=*/false, seq};
     update.prev_seq = prev_seq;
     return update;
 }

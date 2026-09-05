@@ -39,7 +39,7 @@ void AppendLevels(ondemand::array levels, std::vector<PriceLevel>& out) {
 
 OkxParser::OkxParser(uint32_t venue_depth) : Parser(venue_depth) {}
 
-std::optional<BookUpdate> OkxParser::ParseBooksMessage(std::string_view message, VenueId venue, InstrumentId instrument) {
+std::optional<BookUpdate> OkxParser::ParseBooksMessage(std::string_view message, VenueId venue, InstrumentKey instrument) {
     try {
         ondemand::document doc = parser_.iterate(Load(message));
 
@@ -97,7 +97,7 @@ std::optional<BookUpdate> OkxParser::ParseBooksMessage(std::string_view message,
     }
 }
 
-std::optional<BookUpdate> OkxParser::ParseBboMessage(std::string_view message, VenueId venue, InstrumentId instrument) {
+std::optional<BookUpdate> OkxParser::ParseBboMessage(std::string_view message, VenueId venue, InstrumentKey instrument) {
     try {
         ondemand::document doc = parser_.iterate(Load(message));
 

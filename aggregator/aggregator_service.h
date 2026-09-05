@@ -25,13 +25,13 @@ class AggregatorServiceImpl final : public wire::Aggregator::Service {
     // a new consolidated BBO is available. Fans out to every session that
     // asked for BBO. May be called from any provider's thread - must be safe
     // to call concurrently.
-    void PublishBbo(InstrumentId instrument, const consolidated::BBO& bbo);
+    void PublishBbo(InstrumentKey instrument, const consolidated::BBO& bbo);
 
     // Called via Core's BookCallback with a fresh, immutable merged book on
     // every depth update. This is where per-subscriber band selection
     // happens (§8.4): each session's own thresholds are walked against this
     // one shared snapshot, so Core never learns what any client asked for.
-    void PublishBook(InstrumentId instrument, std::shared_ptr<const consolidated::Book> book);
+    void PublishBook(InstrumentKey instrument, std::shared_ptr<const consolidated::Book> book);
 
     // Slot -> wire venue, for resolving the attribution md_core publishes by
     // slot (DESIGN.md §17.6). Set by main.cpp once, after every provider has

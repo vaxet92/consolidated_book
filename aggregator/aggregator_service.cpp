@@ -29,9 +29,16 @@ const std::vector<uint32_t> kDefaultBpsBands = {500};  // 50, 100, 200, 500, 100
 // Fills the common header every Update carries regardless of payload, so a
 // client never needs state from an earlier message to interpret this one
 // (§7.4 - a state-publishing API, not an event log).
-void FillHeader(wire::Update& update, InstrumentId instrument) {
+// TODO(futures): the wire carries the SYMBOL but not the MARKET. A client
+// cannot yet tell a spot BTCUSDT update from a futures one - they arrive with
+// the same `symbol` string. Core keeps them in separate books correctly; the
+// proto needs a market_type field on SubscribeRequest and Update before
+// futures is usable end to end. See DESIGN.md futures step F5.
+void FillHeader(wire::Update& update, InstrumentKey instrument) {
     update.set_server_ts_ns(NowNs());
-    update.set_symbol(VenueConverter::ToInstrumentString(instrument));
+    // Symbol() only - ToInstrumentString(InstrumentKey) would emit
+    // "BTCUSDT:spot", which is a log format, not a wire symbol.
+    update.set_symbol(VenueConverter::ToInstrumentString(instrument.Symbol()));
     update.set_price_scale(kScaleExponent);
     update.set_qty_scale(kScaleExponent);
 }
@@ -52,8 +59,8 @@ void AggregatorServiceImpl::UnregisterSession(uint64_t session_id) {
 
 grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, const wire::SubscribeRequest* request,
                                               grpc::ServerWriter<wire::Update>* writer) {
-    InstrumentId instrument = VenueConverter::ToInstrumentId(request->symbol());
-    if (instrument == InstrumentId::UNKNOWN) {
+    const std::optional<InstrumentId> instrument = VenueConverter::ToInstrumentId(request->symbol());
+    if (!instrument.has_value()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown symbol: " + request->symbol());
     }
 
@@ -131,7 +138,7 @@ grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, cons
     return grpc::Status::OK;
 }
 
-void AggregatorServiceImpl::PublishBbo(InstrumentId instrument, const consolidated::BBO& bbo) {
+void AggregatorServiceImpl::PublishBbo(InstrumentKey instrument, const consolidated::BBO& bbo) {
     wire::Update update;
     FillHeader(update, instrument);
     *update.mutable_bbo() = ToWire(bbo, venue_wire_table_);
@@ -148,7 +155,7 @@ void AggregatorServiceImpl::PublishBbo(InstrumentId instrument, const consolidat
     }
 }
 
-void AggregatorServiceImpl::PublishBook(InstrumentId instrument, std::shared_ptr<const consolidated::Book> book) {
+void AggregatorServiceImpl::PublishBook(InstrumentKey instrument, std::shared_ptr<const consolidated::Book> book) {
     if (!book) {
         return;
     }
