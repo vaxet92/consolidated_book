@@ -1,7 +1,8 @@
 # md_core/CMakeLists.txt
 add_library(md_core STATIC
     md_core.cpp
-    venue_book.cpp
+    map_order_book.cpp
+    flat_order_book.cpp
     consolidated_bbo.cpp
     consolidated_book.cpp
 )

@@ -132,10 +132,16 @@ message PriceBands {
   repeated PriceBandResult ask_bands = 2;
 }
 
-// TODO: not populated yet - staleness policy (DESIGN_1 §6) is not built.
-// Only `venue` and `contributed` can be honestly filled in today (from
-// whether ComputeConsolidatedBBO saw any data from this venue); state,
-// age_ms, and drift_ms are placeholders for the watchdog/drift detector.
+// TODO: not populated on the wire yet. The staleness policy IS built - the
+// watchdog runs, verdicts are computed per venue and per stream, and a venue
+// that is not kLive is already excluded from the merge - so the data behind
+// every field below exists in Core (VenueHealthArray). What is missing is
+// only the plumbing that copies it into this message.
+//
+// KEY: that gap is visible to clients in the worst way. A stale venue is
+// silently dropped from the merged book, and the client has no field telling
+// it that happened - so a book that thinned from three venues to two looks
+// identical to a book where two venues simply had no depth at that price.
 message VenueStatus {
   Venue venue = 1;
   bool contributed = 2;

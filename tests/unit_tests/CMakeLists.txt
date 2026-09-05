@@ -2,7 +2,8 @@
 find_package(GTest REQUIRED)
 
 add_executable(unit_tests
-    src/test_venue_book.cpp
+    src/test_map_order_book.cpp
+    src/test_flat_order_book.cpp
     src/test_consolidated_bbo.cpp
     src/test_binance_parser.cpp
     src/test_bybit_parser.cpp

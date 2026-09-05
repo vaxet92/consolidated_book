@@ -183,7 +183,7 @@ Use these conventions consistently:
 | Element | Convention | Example |
 |---|---|---|
 | Namespace | snake_case | `market_data` |
-| Class / struct | PascalCase | `VenueBook` |
+| Class / struct | PascalCase | `MapOrderBook` |
 | Enum class | PascalCase | `BookState` |
 | Enum value | kPascalCase | `kLive` |
 | Function / method | PascalCase | `ApplyUpdate()` |
@@ -200,7 +200,7 @@ Use descriptive names. Avoid abbreviations unless they are standard domain terms
 Prefer:
 
 ```cpp
-VenueBook venue_book;
+MapOrderBook venue_book;
 BookUpdate book_update;
 const auto& update = ...;
 ```
@@ -208,7 +208,7 @@ const auto& update = ...;
 over:
 
 ```cpp
-VenueBook vb;
+MapOrderBook vb;
 BookUpdate bu;
 auto& u = ...;
 ```
@@ -238,13 +238,13 @@ auto& u = ...;
 Make ownership explicit.
 
 ```cpp
-std::unique_ptr<VenueBook> book;
+std::unique_ptr<MapOrderBook> book;
 ```
 
 means ownership.
 
 ```cpp
-VenueBook& book;
+MapOrderBook& book;
 ```
 
 means non-owning access.
@@ -252,7 +252,7 @@ means non-owning access.
 Avoid APIs such as:
 
 ```cpp
-void Process(VenueBook* book);
+void Process(MapOrderBook* book);
 ```
 
 when ownership semantics are unclear.

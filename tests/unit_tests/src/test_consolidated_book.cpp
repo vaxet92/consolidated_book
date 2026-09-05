@@ -9,14 +9,17 @@ namespace {
 
 // These fixtures fill the book array by index, so slot == VenueId here.
 // Named once rather than cast at each assertion (DESIGN.md §17.6).
-constexpr VenueSlot SlotOf(VenueId venue) { return static_cast<VenueSlot>(static_cast<size_t>(venue)); }
+constexpr VenueSlot SlotOf(VenueId venue) {
+    return static_cast<VenueSlot>(static_cast<size_t>(venue));
+}
 
-void SetBook(VenueBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
+void SetBook(MapOrderBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
     BookUpdate update{venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot), bids.size(), true, 1};
     update.bids = std::move(bids);
     update.asks = std::move(asks);
 
-    books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+    books[static_cast<size_t>(venue)] =
+        std::make_unique<MapOrderBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     books[static_cast<size_t>(venue)]->ApplyUpdate(update);
 }
 
@@ -31,7 +34,7 @@ uint64_t CumNotional(const MergedLevel& level) {
 // ------------------------------------------------------------- MergeBooks ---
 
 TEST(ConsolidatedBookTest, EmptyVenuesProduceEmptyBook) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     Book merged;
 
     MergeBooks(books, kVenueCount, merged);
@@ -41,7 +44,7 @@ TEST(ConsolidatedBookTest, EmptyVenuesProduceEmptyBook) {
 }
 
 TEST(ConsolidatedBookTest, SingleVenueIsCopiedWithPrefixSums) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}, {99, 3}}, {{101, 2}});
     Book merged;
 
@@ -63,7 +66,7 @@ TEST(ConsolidatedBookTest, SingleVenueIsCopiedWithPrefixSums) {
 // Bids must come out descending and asks ascending, regardless of which
 // venue contributed which level.
 TEST(ConsolidatedBookTest, DisjointPricesInterleaveInSortedOrder) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 1}, {98, 1}}, {{105, 1}, {107, 1}});
     SetBook(books, VenueId::OKX, {{99, 1}, {97, 1}}, {{106, 1}, {108, 1}});
     Book merged;
@@ -86,7 +89,7 @@ TEST(ConsolidatedBookTest, DisjointPricesInterleaveInSortedOrder) {
 // The case the whole attribution design exists for (§5.3): two venues at the
 // same price collapse into ONE level carrying both.
 TEST(ConsolidatedBookTest, SamePriceAcrossVenuesMergesWithAttribution) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {});
     SetBook(books, VenueId::OKX, {{100, 3}}, {});
     SetBook(books, VenueId::BYBIT, {{100, 2}}, {});
@@ -110,7 +113,7 @@ TEST(ConsolidatedBookTest, SamePriceAcrossVenuesMergesWithAttribution) {
 }
 
 TEST(ConsolidatedBookTest, PartiallyOverlappingPricesMergeCorrectly) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}, {98, 2}}, {});
     SetBook(books, VenueId::OKX, {{100, 3}, {99, 4}}, {});
     Book merged;
@@ -129,7 +132,7 @@ TEST(ConsolidatedBookTest, PartiallyOverlappingPricesMergeCorrectly) {
 }
 
 TEST(ConsolidatedBookTest, MaxDepthTruncatesBothSides) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 1}, {99, 1}, {98, 1}, {97, 1}}, {{101, 1}, {102, 1}, {103, 1}, {104, 1}});
     Book merged;
 
@@ -144,7 +147,7 @@ TEST(ConsolidatedBookTest, MaxDepthTruncatesBothSides) {
 // LevelQty recovers the per-level quantity that MergedLevel deliberately
 // does not store.
 TEST(ConsolidatedBookTest, LevelQtyRecoversPerLevelQuantity) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}, {99, 3}, {98, 7}}, {});
     Book merged;
 
@@ -161,12 +164,12 @@ TEST(ConsolidatedBookTest, LevelQtyRecoversPerLevelQuantity) {
 TEST(ConsolidatedBookTest, ReusedBookHasNoStaleLevels) {
     Book merged;
 
-    VenueBookArray first{};
+    MapOrderBookArray first{};
     SetBook(first, VenueId::BINANCE, {{100, 1}, {99, 1}, {98, 1}}, {{101, 1}});
     MergeBooks(first, kVenueCount, merged);
     ASSERT_EQ(merged.bids.size(), 3u);
 
-    VenueBookArray second{};
+    MapOrderBookArray second{};
     SetBook(second, VenueId::OKX, {{200, 9}}, {});
     MergeBooks(second, kVenueCount, merged);
 
@@ -194,7 +197,7 @@ constexpr QtyUnits Qty(uint64_t whole) {
 
 // Asks: 100@5, 101@10, 102@20. Cumulative notional: 500, 1510, 3550 USDT.
 Book MakeBandBook() {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {}, {{Px(100), Qty(5)}, {Px(101), Qty(10)}, {Px(102), Qty(20)}});
     Book merged;
     MergeBooks(books, kVenueCount, merged);
@@ -294,7 +297,7 @@ TEST(ConsolidatedBookTest, FillToBpsAskSideWalksUp) {
 }
 
 TEST(ConsolidatedBookTest, FillToBpsBidSideWalksDown) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{Px(100), Qty(5)}, {Px(99), Qty(10)}, {Px(98), Qty(20)}}, {});
     Book merged;
     MergeBooks(books, kVenueCount, merged);
@@ -388,7 +391,7 @@ constexpr auto kDisconnected = VenueHealth::kDisconnected;
 // on it, so if it ever changed meaning those tests would start asserting
 // something different without saying so.
 TEST(ConsolidatedBookTest, NullHealthAdmitsEveryVenue) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 1}});
     Book merged;
@@ -401,7 +404,7 @@ TEST(ConsolidatedBookTest, NullHealthAdmitsEveryVenue) {
 }
 
 TEST(ConsolidatedBookTest, StaleVenueContributesNoLevels) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
     Book merged;
@@ -423,7 +426,7 @@ TEST(ConsolidatedBookTest, StaleVenueContributesNoLevels) {
 // WINS. Here it wins both sides at once and produces a CROSSED consolidated
 // book: a phantom 90-tick arbitrage that no one can trade.
 TEST(ConsolidatedBookTest, FrozenVenueNoLongerWinsTheBestBid) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{50000, 2}}, {{50010, 2}});  // frozen, pre-move
     SetBook(books, VenueId::BYBIT, {{49900, 3}}, {{49910, 3}});    // live, market fell
     SetBook(books, VenueId::OKX, {{49899, 4}}, {{49911, 4}});      // live
@@ -451,7 +454,7 @@ TEST(ConsolidatedBookTest, FrozenVenueNoLongerWinsTheBestBid) {
 // admission depend on a second, unrelated invariant - so this test gives the
 // kNoData venue a full book to make sure the verdict is what excludes it.
 TEST(ConsolidatedBookTest, NoDataVenueIsExcludedToo) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
     Book merged;
@@ -466,7 +469,7 @@ TEST(ConsolidatedBookTest, NoDataVenueIsExcludedToo) {
 // Total outage. Publishing nothing is honest; publishing three frozen books
 // is a lie the client cannot detect.
 TEST(ConsolidatedBookTest, AllVenuesStaleProducesEmptyBook) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
     SetBook(books, VenueId::OKX, {{98, 2}}, {{103, 2}});
@@ -483,7 +486,7 @@ TEST(ConsolidatedBookTest, AllVenuesStaleProducesEmptyBook) {
 // only from the totals. A client reading `venues` to see who is quoting must
 // never be told a stale venue is still there.
 TEST(ConsolidatedBookTest, ExcludedVenueDisappearsFromAttribution) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
     SetBook(books, VenueId::BYBIT, {{100, 7}}, {{101, 3}});  // same price - ties
     Book merged;
@@ -503,7 +506,7 @@ TEST(ConsolidatedBookTest, ExcludedVenueDisappearsFromAttribution) {
 // stale would leave its levels behind in a recycled buffer - and the bug
 // would appear only after warm-up, when reuse begins.
 TEST(ConsolidatedBookTest, ReusedBufferDropsAVenueThatWentStale) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
     SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
 
@@ -528,7 +531,7 @@ TEST(ConsolidatedBookTest, ReusedBufferDropsAVenueThatWentStale) {
 // may be only milliseconds old. They are still refused, because without a
 // connection there is no way to learn that they have stopped being true.
 TEST(ConsolidatedBookTest, DisconnectedVenueIsExcluded) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{50000, 2}}, {{50010, 2}});
     SetBook(books, VenueId::BYBIT, {{49900, 3}}, {{49910, 3}});
     Book merged;
@@ -547,7 +550,7 @@ TEST(ConsolidatedBookTest, DisconnectedVenueIsExcluded) {
 // correct, because the other two still exclude.
 TEST(ConsolidatedBookTest, EveryNonLiveStateExcludesIndependently) {
     for (VenueHealth bad : {kStale, kNoData, kDisconnected, VenueHealth::kResyncing}) {
-        VenueBookArray books{};
+        MapOrderBookArray books{};
         SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 1}});
         SetBook(books, VenueId::BYBIT, {{99, 7}}, {{102, 3}});
         Book merged;

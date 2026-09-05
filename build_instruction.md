@@ -1,32 +1,45 @@
 # Build instructions
 
-## Plain build (works today, no vcpkg needed) - verified working
+## vcpkg is required
 
-Nothing in `types`/`md_core` depends on vcpkg packages, so a plain CMake
-configure works with no extra setup. Confirmed working end-to-end:
+`md_core` and `types` themselves depend on nothing from vcpkg - that is what
+keeps the domain logic testable without a toolchain - but the top-level build
+always configures `md_provider`, `aggregator` and `client`, which need
+Boost.Beast/Asio, OpenSSL, gRPC, Protobuf and simdjson. Set vcpkg up first
+(see below).
 
 ```
-cmake -S . -B build -DBUILD_SERVER=OFF -DBUILD_TESTS=OFF
+cmake -S . -B build
 cmake --build build -j
 ```
 
-This builds `libmd_core.a` (and `types`, which it depends on) and nothing
-else. `utils` was removed - it was dead code left over from the deleted
-candle_manager, nothing includes it anymore.
+> **`-DBUILD_SERVER=OFF` does nothing.** The option is declared but gates
+> nothing: `md_provider`, `aggregator` and `client` are added unconditionally,
+> and the only `if (BUILD_SERVER)` guard is commented out for a `server/`
+> directory that does not exist. This document previously claimed the flag gave
+> a vcpkg-free build of `md_core` alone; it does not. Either delete the option
+> or make it gate those three subdirectories - it should not stay as a flag
+> that reads like it does something.
+>
+> To build just the domain library without the network stack, name the target:
+> `cmake --build build --target md_core`.
 
 ## With tests
 
-No test sources exist yet - the old candle/trade parser tests were deleted
-along with candle_manager. The first real one (VenueBook) is the next step.
-This still configures cleanly, it just has nothing to run yet:
+260 tests across 24 suites, all passing, in about 3 seconds. They cover the
+books (both implementations, compared against each other), the merge, band
+math, the three venue parsers, sequence continuity and dedup, the SPSC queue,
+venue and instrument registries, config parsing, and the gRPC service over a
+real in-process server:
 
 ```
-cmake -S . -B build -DBUILD_SERVER=OFF -DBUILD_TESTS=ON
-cmake --build build -j
+cmake -S . -B build -DBUILD_TESTS=ON
+cmake --build build --target unit_tests -j
 ctest --test-dir build --output-on-failure
 ctest --test-dir build --output-on-failure -R <test>
 
-./build/unit_tests/unit_tests --gtest_filter=VenueBookTest.ZeroQtyDeltaRemovesLevel
+./build/tests/unit_tests/unit_tests --gtest_filter=MapOrderBookTest.ZeroQtyDeltaRemovesLevel
+./build/tests/unit_tests/unit_tests --gtest_filter='FlatOrderBookTest.*'
 ```
 
 ## With the server

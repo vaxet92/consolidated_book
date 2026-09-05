@@ -3,7 +3,7 @@
 #include "types/venue.h"
 #include "types/venue_registry.h"
 #include "provider_message.h"
-#include "venue_book.h"
+#include "flat_order_book.h"
 #include "consolidated_bbo.h"
 #include "consolidated_book.h"
 #include "types.h"
@@ -25,7 +25,18 @@ namespace market_data {
 // Keyed by InstrumentKey, so spot and futures for the same symbol are
 // different entries and their books can never be merged together (§1.3).
 // InstrumentKeyHash is the identity on the packed uint32_t.
-using InstrumentBooks = std::unordered_map<InstrumentKey, VenueBookArray, InstrumentKeyHash>;
+//
+// FlatBookArray, not MapOrderBookArray: Core holds the flat books. The std::map
+// implementation is still compiled, linked and tested - it is the permanent
+// oracle and the benchmark's comparison arm - but it is not what production
+// runs (CLAUDE.md §6).
+//
+// KEY: this typedef and the two make_unique calls in md_core.cpp are the ENTIRE
+// coupling between Core and the book implementation. Everything else Core does
+// goes through ApplyUpdate / BestBid / BestAsk / bids(), which both types
+// provide identically - which is what made swapping the implementation a
+// three-line change rather than a rewrite.
+using InstrumentBooks = std::unordered_map<InstrumentKey, FlatBookArray, InstrumentKeyHash>;
 using InstrumentQuotes = std::unordered_map<InstrumentKey, VenueQuoteArray, InstrumentKeyHash>;
 using InstrumentBbo = std::unordered_map<InstrumentKey, consolidated::BBO, InstrumentKeyHash>;
 
@@ -67,7 +78,7 @@ class Core {
     // changes and nothing inside Core does - which is why the registry is
     // keyed on the venue name rather than on VenueId.
 
-    // Assigns `name` a slot, and creates that venue's VenueBook for every
+    // Assigns `name` a slot, and creates that venue's FlatOrderBook for every
     // instrument that already exists. Idempotent: a provider that crashed and
     // reconnected gets the SAME slot back, so it resumes the books it had
     // rather than stranding them under a slot nobody feeds.
@@ -79,7 +90,7 @@ class Core {
     // avoid.
     std::optional<VenueSlot> RegisterVenue(std::string_view name);
 
-    // Takes a venue out of service: frees its VenueBook for every instrument
+    // Takes a venue out of service: frees its FlatOrderBook for every instrument
     // and resets both stream verdicts to kNoData, so the next merge simply
     // does not see it. Instruments fed by other venues keep publishing, one
     // venue thinner - which is already the correct behaviour and already what
@@ -121,7 +132,7 @@ class Core {
     void ApplyUpdate(const BookUpdate& update);
 
     // Fast-BBO path (DESIGN_1 §4.4 option 1) - this is what drives the
-    // published BBO. Never touches VenueBook: the two streams are not
+    // published BBO. Never touches FlatOrderBook: the two streams are not
     // mutually sequenced, so mixing them corrupts the book (§7).
     void ApplyQuote(const BboQuote& quote);
 
@@ -229,7 +240,7 @@ class Core {
         // mutex path this was lock contention; on the queued path it is 0
         // (there is no lock) until the message carries an enqueue stamp.
         int64_t lock_wait_ns = 0;
-        int64_t book_apply_ns = 0;  // VenueBook::ApplyUpdate - the delta
+        int64_t book_apply_ns = 0;  // FlatOrderBook::ApplyUpdate - the delta
         int64_t merge_ns = 0;       // MergeBooks - the k-way merge
         uint32_t merged_depth = 0;  // output levels, bid side
         uint32_t delta_levels = 0;  // levels in the incoming update, both sides
@@ -249,7 +260,7 @@ class Core {
     }
 
     // Starts the consolidator thread: the single thread that drains every
-    // venue queue and owns every VenueBook from here on (DESIGN.md §7.2/§7.3).
+    // venue queue and owns every FlatOrderBook from here on (DESIGN.md §7.2/§7.3).
     //
     // KEY: after Start(), the book logic is single-threaded. That is the whole
     // point - not speed, but that a single-threaded book is deterministic,
@@ -312,7 +323,7 @@ class Core {
     std::string_view VenueName(VenueSlot slot) const { return venue_registry_.Name(slot); }
 
    private:
-    // Creates the VenueBookArray for `instrument`, with a VenueBook for each
+    // Creates the FlatBookArray for `instrument`, with a FlatOrderBook for each
     // venue that is currently ACTIVE and nulls everywhere else.
     //
     // No venue list parameter: venues come from RegisterVenue, not from
@@ -372,9 +383,9 @@ class Core {
     // a registered-then-removed slot is still inside it and must not be given
     // a book when a new instrument arrives.
     //
-    // Holds the VenueId because VenueBook's constructor still takes one. That
+    // Holds the VenueId because FlatOrderBook's constructor still takes one. That
     // is the single remaining place Core depends on the enum, kept in one
-    // visible spot so the step that migrates VenueBook to VenueSlot can delete
+    // visible spot so the step that migrates FlatOrderBook to VenueSlot can delete
     // exactly this and nothing else.
     std::array<std::optional<VenueId>, kMaxVenues> active_venues_{};
 
@@ -466,7 +477,6 @@ class Core {
     // skip the notify entirely when the consumer is awake and draining.
     std::atomic<bool> consumer_waiting_{false};
 
-
     // Latest verdict per venue, one array per stream because depth and
     // fast-BBO are separate sockets and fail independently (§6.2d).
     //
@@ -526,8 +536,7 @@ class Core {
     // structures without a measured reason). "Assume no slow subscriber" -
     // if that assumption breaks, the pool simply grows by one buffer rather
     // than corrupting anything.
-    std::unordered_map<InstrumentKey, std::vector<std::shared_ptr<consolidated::Book>>, InstrumentKeyHash>
-        book_pools_;
+    std::unordered_map<InstrumentKey, std::vector<std::shared_ptr<consolidated::Book>>, InstrumentKeyHash> book_pools_;
 
     // Returns a Book buffer for `instrument` that no subscriber currently
     // holds, reusing one from the pool if possible. Not thread-safe on its

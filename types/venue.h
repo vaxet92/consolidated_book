@@ -55,7 +55,7 @@ inline constexpr uint32_t kSymbolShift = 8;
 //
 // KEY: this is what makes mixing spot and futures IMPOSSIBLE rather than
 // merely forbidden. MergeBooks merges across venue slots within ONE key, so
-// two different keys land in two different VenueBookArrays and can never meet.
+// two different keys land in two different MapOrderBookArrays and can never meet.
 // Had MarketType gone on the venue instead, both would sit in the same merge
 // and correctness would depend on a filter someone has to remember to write.
 //

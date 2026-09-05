@@ -58,7 +58,8 @@ constexpr const char* kRestartMessage = R"({
 
 TEST(BybitParserTest, ParsesSnapshotMessage) {
     BybitParser parser(/*venue_depth=*/50);
-    auto update = parser.ParseOrderbookMessage(kSnapshotMessage, VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+    auto update = parser.ParseOrderbookMessage(kSnapshotMessage, VenueId::BYBIT,
+                                               MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     ASSERT_TRUE(update.has_value());
     EXPECT_EQ(update->venue, VenueId::BYBIT);
@@ -77,13 +78,14 @@ TEST(BybitParserTest, ParsesSnapshotMessage) {
 
 TEST(BybitParserTest, ParsesDeltaMessageAsNonSnapshot) {
     BybitParser parser(/*venue_depth=*/50);
-    auto update = parser.ParseOrderbookMessage(kDeltaMessage, VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+    auto update =
+        parser.ParseOrderbookMessage(kDeltaMessage, VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     ASSERT_TRUE(update.has_value());
     EXPECT_FALSE(update->is_snapshot);
     EXPECT_EQ(update->seq, 177400508u);
     // qty "0" means "remove this level" - still a normal level entry here,
-    // VenueBook is what interprets qty==0 as a removal.
+    // MapOrderBook is what interprets qty==0 as a removal.
     ASSERT_EQ(update->bids.size(), 1u);
     EXPECT_EQ(update->bids[0].qty, 0u);
 }
@@ -94,7 +96,8 @@ TEST(BybitParserTest, ParsesDeltaMessageAsNonSnapshot) {
 // Missing it would merge a brand-new book into a stale one.
 TEST(BybitParserTest, UpdateIdOneIsNormalisedToSnapshot) {
     BybitParser parser(/*venue_depth=*/50);
-    auto update = parser.ParseOrderbookMessage(kRestartMessage, VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+    auto update = parser.ParseOrderbookMessage(kRestartMessage, VenueId::BYBIT,
+                                               MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
 
     ASSERT_TRUE(update.has_value());
     EXPECT_TRUE(update->is_snapshot) << R"(u == 1 must be treated as a snapshot despite "type":"delta")";
@@ -103,12 +106,14 @@ TEST(BybitParserTest, UpdateIdOneIsNormalisedToSnapshot) {
 
 TEST(BybitParserTest, IgnoresNonOrderbookMessages) {
     BybitParser parser(/*venue_depth=*/50);
-    auto update = parser.ParseOrderbookMessage(kSubscribeAck, VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+    auto update =
+        parser.ParseOrderbookMessage(kSubscribeAck, VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_FALSE(update.has_value());
 }
 
 TEST(BybitParserTest, MalformedJsonReturnsNulloptNotACrash) {
     BybitParser parser(/*venue_depth=*/50);
-    auto update = parser.ParseOrderbookMessage("{not valid json", VenueId::BYBIT, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+    auto update = parser.ParseOrderbookMessage("{not valid json", VenueId::BYBIT,
+                                               MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     EXPECT_FALSE(update.has_value());
 }

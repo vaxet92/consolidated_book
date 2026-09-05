@@ -55,12 +55,24 @@ Then stop. Let them pick the thread.
 
 **Q: Who owns the books?**
 
-> The design is that one consolidator thread owns all three `VenueBook`s and
-> venue threads reach it through per-venue SPSC queues, so there is no lock on
-> the book path at all. **That is not what the code does today** — the queues
-> are not built, and a mutex in `Core` guards the books instead. It is
-> commented as interim at the declaration and flagged in `DESIGN.md §7.2`. I
-> would rather say that than let you find it.
+> One consolidator thread owns every book. Venue threads parse, push into their
+> own SPSC ring buffer, and return — they never touch a book. There is no lock
+> on the book path.
+>
+> The interesting part is what that cost. Replacing an uncontended mutex with
+> lock-free queues made the median publish latency **worse**: 76.1 µs to
+> 113.3 µs. The consolidator kept finding the queues empty, sleeping, and paying
+> a ~37 µs wakeup on nearly every message. It only beat the mutex once it spun
+> before sleeping — 73.8 µs, with `lock_wait` at 0.0.
+>
+> **Removing a lock does not remove the cost, it moves it.** Here it moved from
+> lock contention, which was near zero, to thread wakeups, which were not. The
+> spin window is bounded, so a dead feed costs ~0% CPU instead of a permanently
+> burned core; measured cost under live load is ~15–20% of one core.
+>
+> I would have made the change even if it had been latency-neutral, though. The
+> real win is that the book logic is now single-threaded and deterministic —
+> testable with fake input and TSan-clean by construction rather than by care.
 
 **Q: Why not a seqlock, with each venue owning its own book?**
 
@@ -73,14 +85,20 @@ Then stop. Let them pick the thread.
 
 **Q: You have mutexes. Isn't this HFT?**
 
-> Three of them, and they are not equivalent. `Core::apply_mutex_` is on the
-> per-message path and should go — but the fix is SPSC queues, not a lock-free
-> book. **The best way to remove a lock is to remove the sharing, not to make
+> Not on the book path any more — that one is gone, replaced by per-venue SPSC
+> queues. **The best way to remove a lock is to remove the sharing, not to make
 > the shared thing lock-free**; a lock-free shared book still bounces the same
-> cache lines between cores. The `conflated_channel` condition variable should
-> *stay*: its job is to let the gRPC writer thread sleep when idle, and
-> replacing it with a spin would burn a core per client to avoid an
-> uncontended lock.
+> cache lines between cores, whereas one owning thread bounces nothing.
+>
+> The two that remain are deliberate. `sessions_mutex_` is per-publish and
+> low-contention, and it guards fan-out to clients rather than the message path.
+> The `conflated_channel` condition variable should *stay*: its job is to let a
+> gRPC writer thread sleep when idle, and replacing it with a spin would burn a
+> core per client to avoid an uncontended lock.
+>
+> That condition variable is also where I found a real bug — see 10.5. The
+> mechanism being correct did not stop the *loop around it* from being able to
+> block forever.
 
 ---
 
@@ -415,42 +433,89 @@ Then stop. Let them pick the thread.
 
 **What is measured** (`bench_md_core`, Apple M4 Pro, Release, medians):
 
-| operation | cost |
-|---|---|
-| delta apply, 100 levels | 333 ns (was 792 ns before the hint work) |
-| merge, 1000 output levels | 8.25 µs |
-| merge, 400 / 50 levels | 3.79 µs / 375 ns |
-| **tree traversal alone** | **9.04 µs** |
-| BBO incremental | < 42 ns (below clock resolution) |
-| BBO full scan | 83 ns |
-| `steady_clock::now()` | ~14 ns |
+Both book implementations run as arms of the **same** benchmark process, so
+map-vs-flat carries no cross-run drift. That matters: `qty_update_50` on
+*unchanged* `std::map` code read 209 ns in one run and 500 ns in the next.
 
-**Still not measured:** the ~200 ns queue hop in `DESIGN.md §7.2` — the SPSC
-queues do not exist.
+| operation | `std::map` | flat |
+|---|---|---|
+| **traversal alone** | **9833 ns** | **584 ns** |
+| merge, 1000 output levels | 11 166 ns | 9333 ns |
+| merge, 400 / 50 levels | 4958 / 500 ns | 4125 / 500 ns |
+| quantity-only delta, 50 levels | 208 ns | 84 ns |
+| top-of-book churn, 20 erase + 20 insert | 1833 ns | **167 ns** |
+| the same churn 500 levels deep | 2000 ns | **3333 ns** |
+| BBO incremental / full scan | < 42 ns / 84 ns | — |
+
+Live, `book_publish`: median **73.8 µs**, of which `merge` is **50.9 µs** and
+`book_apply` 5.8 µs. `lock_wait` is 0.0.
 
 **Q: Is `std::map` the bottleneck?**
 
-> For the merge, it is essentially the *whole* cost. Walking the three maps with
-> no merge logic at all — no selection, no tie handling, no prefix sums — costs
-> 9.04 µs against 8.25 µs for the complete merge. So the merge's arithmetic is
-> in the noise and what I am paying for is pointer-chasing through red-black
-> tree nodes. Cost is linear in output depth, about 4.3 ns per level.
+> For iteration, badly — 16.8×. For the merge, I thought it was essentially the
+> whole cost, and **I was wrong**, and I think how I was wrong is the more
+> useful answer.
+>
+> What I wrote down was: traversal alone costs 9.04 µs against 8.25 µs for the
+> complete merge, therefore the merge's arithmetic is noise and the merge *is*
+> traversal. That inference is unsound. Two costs being roughly equal is equally
+> consistent with "this one causes that one" and with "they are different work
+> that happens to cost the same", and I had no way to tell them apart from that
+> measurement alone.
+>
+> Building the flat book separated them. Traversal fell **16.8×** and the merge
+> improved **16%**. So the merge was never traversal-bound — it is
+> **write-bound**. `MergedLevel` is 176 bytes and a full merge writes about
+> 2000 of them, ~352 KB of output against ~77 KB of input read.
+>
+> Of those 176 bytes, 128 are a `venues[8]` attribution array with three
+> entries ever used. That is the real target, and I have not done it.
 
 **Q: So you replaced it with a flat vector?**
 
-> No, and that is the point. I then measured how often it runs. A live probe put
-> Binance's depth stream at about nine messages a second, so roughly thirty
-> merges a second across three venues. Thirty times 8.25 µs is **0.026% of one
-> core**. The flat vector would make it several times faster and it would not
-> matter, so I did not build it and I wrote down the number that says why.
+> Yes, eventually — and my first version was a regression I would not have
+> shipped.
 >
-> If the rate went up a hundredfold — tick-by-tick feeds, or many symbols — the
-> answer changes, and by then I would have the before-number ready.
+> Originally I said no, and for a defensible reason: at ~30 merges a second,
+> 8.25 µs is 0.026% of a core, so making it faster would not matter. I built it
+> anyway because the design document had committed to it, and because the
+> unbounded-book problem below turns out to be a correctness-adjacent issue
+> rather than a speed one.
+>
+> The first version applied a delta by merging the whole side into a scratch
+> buffer and swapping. A five-level delta and a fifty-level delta cost the
+> **identical** 1500 ns — the fingerprint of O(book) rather than O(delta) — and
+> the bytes-moved counter read exactly 32000 every time, which is 2 sides ×
+> 1000 levels × 16 bytes. The whole book, rewritten to change five quantities.
+>
+> That is not shippable, and the reason is not the speed. The live Binance book
+> grows **without bound** — its diff stream reports changes across a ~$30 000
+> price range and nothing trims it — so an apply whose cost scales with the book
+> gets worse the longer the process runs. The fix makes the cost scale with the
+> *delta*, which the venue bounds for us.
+>
+> After that: quantity-only deltas move **zero bytes**, top-of-book churn is 11×
+> faster than `std::map`, and removing the top of book is free. Deep structural
+> churn is 1.67× *slower* than `std::map`, which I did not hide — I added a
+> second benchmark arm specifically so the flattering shallow case could not
+> stand alone.
+
+**Q: Why is the best price at the back of the vector?**
+
+> Because that is the end a vector is cheap at, and the top of book is where
+> nearly every update lands. My design document specified the opposite — bids
+> descending, best at `front()` — and its own justifying sentence is what proves
+> it backwards: it says "updates cluster near the top of book, where the memmove
+> is shortest". With the best price at `front()`, a new best bid memmoves the
+> *entire* book, ~16 KB. At `back()` it is a `push_back`.
+>
+> The cost is that every reader walks backwards, which is close to free —
+> hardware prefetchers detect descending strides as well as ascending ones.
 
 **Q: What did you optimise, then?**
 
 > Two things, both measured. The `simdjson` on-demand parser is now constructed
-> once per provider instead of once per message. And `VenueBook::ApplyUpdate`
+> once per provider instead of once per message. And `MapOrderBook::ApplyUpdate`
 > chains an insertion hint through `std::map`, taking a 100-level delta from
 > 792 ns to about 330 ns and an erase-heavy one from 3.33 µs to 2.58 µs — with a
 > detour worth describing, in §10.4.
@@ -565,7 +630,7 @@ queues do not exist.
 
 ---
 
-## 10. The three best answers you have
+## 10. The best answers you have
 
 Interviewers weight these heavily. Each is a real bug, found in this project,
 with a lesson.
@@ -612,7 +677,7 @@ Live log: `[BYBIT] depth gap: expected u=42348956, got 42348963`.
 
 ### 10.4 An optimisation that made things 84% slower
 
-> I added an insertion hint to `std::map` in `VenueBook::ApplyUpdate`, expecting
+> I added an insertion hint to `std::map` in `MapOrderBook::ApplyUpdate`, expecting
 > a speedup because the venues send sorted level arrays. A 50-level delta went
 > from 792 ns to **1458 ns** — 84% *worse*.
 >
@@ -640,9 +705,73 @@ Live log: `[BYBIT] depth gap: expected u=42348956, got 42348963`.
 > work was correct and measured, and it did not matter. I kept it because it was
 > free and tested, and stopped there.
 
+### 10.5 A routing test hung, and the bug was in production
+
+> I wrote a test proving a spot subscriber never receives a futures update. It
+> hung — and so did the entire test binary, forever.
+>
+> The handler blocks in `channel->WaitAndTake()`, waiting on a condition
+> variable, and the loop only re-checks `context->IsCancelled()` at the top.
+> `grpc::ClientContext::TryCancel()` sets a flag **inside gRPC**; it has no way
+> to wake a thread parked on *my* condition variable. So with no publish after
+> the cancel, the handler never returns, the session is never unregistered, and
+> `server->Shutdown()` waits for it forever.
+>
+> **That is a production leak, not a test artifact.** A client that disconnects
+> while its channel is idle leaks a server thread and a session entry for the
+> life of the process — and it is most likely in a *quiet* market, which is
+> exactly when nobody is looking.
+>
+> The fix is a bounded wait: the consumer re-checks cancellation at least every
+> 200 ms. It adds no latency, because a publish still wakes the wait
+> immediately — it only bounds how long a **dead** session can linger.
+>
+> Two things I would want to say about it. First, `ConflatedChannel::Close()`
+> already existed, documented as "wakes any thread blocked in `WaitAndTake()`",
+> with a unit test and **zero production callers** — but it could not have fixed
+> this, because the thread that would call it is the blocked one and nothing
+> else knows the client left. Second, the properly event-driven answer is gRPC's
+> callback/reactor API, where `OnCancel` fires and no thread is parked at all. I
+> did not build that: it rewrites the service, and I would rather name it as a
+> known alternative than pretend polling is ideal.
+
+### 10.6 The oracle caught a bug that nothing else could have
+
+> `MapOrderBook` is kept permanently as a test oracle — every property test
+> drives both implementations from the same updates and asserts they agree. It
+> cost almost nothing to keep. It paid for itself on the first day the flat book
+> was optimised.
+>
+> My in-place delta application chose its walk direction from the **net** size
+> change: backward when the side grows, forward when it shrinks, so the write
+> index never lands on a slot that has not been read. That is right for a pure
+> insert and right for a pure erase, and wrong the moment one delta contains
+> both:
+>
+>     book  [96, 97, 98, 99]      delta best-first:  100 -> 5,  98 -> 0
+>     inserts 1, erases 1, net 0  ->  the rule picks BACKWARD
+>     first step writes the new 100 into side[3], which still held 99
+>
+> The invariant has to hold at every step, not just at the end.
+>
+> **What makes this the story: the corrupted book was still sorted and still
+> exactly the right length**, with one level's data duplicated. No assertion
+> fires. No sanitizer sees it — the write is in bounds. It would have produced
+> quietly wrong quantities on one price level, which is the worst failure mode
+> in market data because it looks like the market.
+>
+> Only comparing full sequences against an independent implementation catches
+> that. I replaced the in-place merge with one staged through a buffer, so the
+> destination is never an input and the question does not arise — it costs one
+> extra pass over the touched region, and it is still O(region), never O(book).
+
 If asked "what was the hardest bug?", 10.1 is the answer: it only appeared
 under live multi-connection load, the symptom pointed at the wrong subsystem,
 and the fix removed code rather than adding it.
+
+If asked "what bug are you most glad you caught?", it is 10.6 — because
+nothing except a deliberately redundant second implementation would have found
+it, and I had to have decided to keep that implementation weeks earlier.
 
 ---
 
@@ -650,10 +779,19 @@ and the fix removed code rather than adding it.
 
 Volunteering this is worth more than being caught by it.
 
-- **SPSC queues are not built.** `DESIGN.md §7.2` describes a lock-free book
-  path; the code has a mutex. Flagged in the doc and at the declaration.
 - **Cross-venue corroboration is not built.** It is the main staleness gap and
   the only sub-minute signal for Binance.
+- **`MergedLevel` is still 176 bytes**, and I know it is where the merge's time
+  goes. 128 of those bytes are an 8-slot attribution array with three entries
+  used. Not shrunk, because an earlier attempt measured 40% *slower* — under
+  conditions (traversal at 9833 ns) that no longer hold, so that result should
+  be re-run rather than trusted.
+- **The flat book has not been measured live**, only in a hot-cache
+  micro-benchmark. The live merge was 50.9 µs against the benchmark's ~9–11 µs,
+  so the production gain is unknown, not assumed.
+- **I do not know the live mix of quantity-only versus structural deltas**,
+  which decides which benchmark arm actually dominates in production. A
+  fast-path counter on the book would settle it in one run.
 - **`VenueStatus` is on the wire and never populated.** Bands and clients were
   finished before the staleness policy, which is how that happened.
 - **No hysteresis.** Recovery from stale waits for the next watchdog tick — a
@@ -664,13 +802,25 @@ Volunteering this is worth more than being caught by it.
   the others live.
 - **Record-and-replay was dropped deliberately**, not forgotten — `md_core`'s
   no-I/O rule already gives deterministic testing for the logic that matters.
-- **Most performance numbers in `DESIGN.md §7.2` are unmeasured estimates.**
+- **`BUILD_SERVER` is a dead CMake option.** It is declared and gates nothing —
+  the only `if (BUILD_SERVER)` is commented out. Found while correcting the
+  build instructions, which claimed it gave a vcpkg-free build.
 
 **Q: If you had another week?**
 
-> Benchmark `ApplyUpdate` and `MergeBooks` first, because several claims in my
-> own design document are unverified and one architectural decision — whether
-> to replace `std::map` — depends entirely on that number. Then the SPSC
-> queues, because that is what makes the code match the design. Then
-> cross-venue staleness. In that order, because the first one tells me whether
-> the third is even on the right path.
+> Run the flat book against live feeds first. Every number I have for it is a
+> hot-cache micro-benchmark, and the live merge is five times the benchmark's,
+> so the thing I most want is the number that tells me whether the change I just
+> made matters in production. It is a few minutes of runtime and it is the
+> cheapest information available.
+>
+> Then shrink `MergedLevel`, because the measurement says that is where the
+> merge's time actually goes and I have not touched it — and because it re-runs
+> an experiment whose original conditions no longer hold.
+>
+> Then cross-venue staleness, which is the real correctness gap: Binance sends
+> no keepalive, so a silently dead Binance feed has no sub-minute detector.
+>
+> In that order, because the first tells me whether the second is worth doing,
+> and the third is the only one of the three that is about being *wrong* rather
+> than being slow.

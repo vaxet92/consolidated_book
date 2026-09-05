@@ -4,7 +4,7 @@ md_core order book latency  (iterations=5000, warmup=1000)
 fixture: binance=1000 bybit=1000 okx=400  ->  1000 merged levels (venues share one tick grid)
 prices x1e8 around 5000000000000, tick 1000000
 
-VenueBook::ApplyUpdate
+MapOrderBook::ApplyUpdate
   qty_update_5      min     41.0  median     83.0  p99     125.0  mean    112.4  ns/call  (checksum 12000)
   qty_update_50     min    625.0  median    792.0  p99     875.0  mean    844.4  ns/call  (checksum 12000)
   churn_20x2        min   2916.0  median   3333.0  p99    4750.0  mean   3567.3  ns/call  (checksum 6000000)
@@ -39,7 +39,7 @@ md_core order book latency  (iterations=5000, warmup=1000)
 fixture: binance=1000 bybit=1000 okx=400  ->  1000 merged levels (venues share one tick grid)
 prices x1e8 around 5000000000000, tick 1000000
 
-VenueBook::ApplyUpdate
+MapOrderBook::ApplyUpdate
   qty_update_5      min      0.0  median     42.0  p99      84.0  mean     94.5  ns/call  (checksum 12000)
   qty_update_50     min    458.0  median    542.0  p99     708.0  mean    603.4  ns/call  (checksum 12000)
   churn_20x2        min   3166.0  median   3667.0  p99    9375.0  mean   3944.8  ns/call  (checksum 6000000)
@@ -68,7 +68,7 @@ md_core order book latency  (iterations=5000, warmup=1000)
 fixture: binance=1000 bybit=1000 okx=400  ->  1000 merged levels (venues share one tick grid)
 prices x1e8 around 5000000000000, tick 1000000
 
-VenueBook::ApplyUpdate
+MapOrderBook::ApplyUpdate
   qty_update_5      min      0.0  median     41.0  p99      42.0  mean     57.8  ns/call  (checksum 12000)
   qty_update_50     min    250.0  median    333.0  p99     334.0  mean    354.5  ns/call  (checksum 12000)
   churn_20x2        min   2292.0  median   2583.0  p99    4792.0  mean   2777.3  ns/call  (checksum 6000000)
@@ -179,7 +179,7 @@ is a separate change and needs its own number.
 
 Provider threads no longer touch the books. They push a `ProviderMessage` into
 a per-venue SPSC ring; one consolidator thread drains every ring and owns all
-`VenueBook`s. `Core::apply_mutex_` is deleted.
+`MapOrderBook`s. `Core::apply_mutex_` is deleted.
 
 ### End-to-end publish latency, live, 1000 samples each
 
@@ -364,3 +364,263 @@ been done.
   the ~37 us wakeup; above it, none do.
 - `kConsolidatorSpinLimit` is one knob: raise toward infinity for a pinned-core
   HFT spin that never sleeps, set to 0 for the sleep-immediately behaviour.
+
+---
+
+## 2026-09-05 - FlatOrderBook vs MapOrderBook (§14.2 step 16): built, measured, NOT yet shippable
+
+Both implementations now live in the tree and are benchmarked **in the same
+process, in the same run**. That is deliberate: the 2026-09-03 entry above
+exists because two runs days apart mixed a real 40% regression with machine
+drift. Comparing map against flat inside one process removes the problem
+instead of correcting for it - there is no drift between two arms of the same
+loop.
+
+Fixture unchanged: binance=1000, bybit=1000, okx=400, ~1000 merged levels,
+20000 iterations, warmup=1000. Medians.
+
+### The numbers
+
+| | map | flat | ratio |
+|---|---|---|---|
+| `iterate_only` | 10166 ns | **584 ns** | **0.057 (17.4x faster)** |
+| `merge_full` | 11041 | 9292 | 0.84 |
+| `merge_depth_400` | 4917 | 4166 | 0.85 |
+| `merge_depth_50` | 500 | 500 | 1.00 |
+| `merge_1venue` | 8250 | 7167 | 0.87 |
+| `merge_2venue` | 10042 | 8792 | 0.88 |
+| `merge_3venue` | 12000 | 10625 | 0.89 |
+| `qty_update_5` | 41 | 1500 | **36x SLOWER** |
+| `qty_update_50` | 292 | 1500 | **5.1x SLOWER** |
+| `churn_20x2` | 2167 | 2708 | 1.25x slower |
+
+Bytes memmoved per diff message, flat book only:
+
+    flat_qty_update_50    32000 bytes    mean = median = p99 = max
+    flat_churn_20x2       63360 bytes    mean = median = p99 = max
+
+### The inference that was WRONG, and how the experiment caught it
+
+The entry above this one reported `merge_full` 8500 ns against `iterate_only`
+9000 ns and concluded: **the merge is ~100% tree traversal**, therefore a flat
+vector should remove most of it.
+
+That conclusion was false, and this run proves it. Traversal fell by 94%.
+The merge fell by 16%.
+
+    if merge = traversal + logic, then
+      map:   11041 = 10166 traversal +  875 logic
+      flat:   9292 =   584 traversal + 8708 logic     <- these disagree by 10x
+
+The model does not hold, so the premise was wrong. Two costs being roughly
+equal is not evidence that one causes the other - the ratio was equally
+consistent with "the merge IS traversal" and with "the merge is something else
+that happens to cost about the same". Only the intervention separated them.
+
+KEY: this is the case for CLAUDE.md section 7. The reasoning was plausible,
+was written down as a conclusion, and was wrong. Nothing but building the
+alternative and measuring it would have found that.
+
+### Where the merge time actually goes: writing the output
+
+`MergedLevel` is **176 bytes**, and that is derived, not guessed:
+
+    price            8
+    venues[8]      128   <- 8 x VenueQuote{VenueSlot, QtyUnits}, 16 bytes each
+    venue_count      1   (padded)
+    cum_qty          8
+    cum_notional    16   (unsigned __int128, 16-byte aligned)
+                   ---
+                   176
+
+`merge_full` writes ~1000 of them per side:
+
+    output written   ~352 KB per merge     2 x 1000 x 176
+    input read        ~77 KB per merge     2 x (1000 + 1000 + 400) x 16, flat
+
+The merge is **write-bound, roughly 4.6:1**. The flat book made the input side
+nearly free and left the dominant term untouched, which is exactly the 16% it
+delivered.
+
+Of those 176 bytes, **128 are the attribution array**, sized `kMaxVenues` (8),
+of which 3 entries are ever populated today.
+
+### Consequence for the 2026-09-05 "out-of-line layout REJECTED" entry
+
+That entry measured MergedLevel 176 -> 48 bytes as **40% SLOWER**
+(ratio 1.13 -> 1.57). It was measured with `std::map` input, when traversal
+cost 10166 ns and dominated everything else in the loop.
+
+Traversal now costs 584 ns. The conditions that produced that result no longer
+exist, so **the result no longer applies and the experiment should be re-run**.
+It is not being reversed here - it is being marked as measured under
+assumptions that have since changed. This is the highest-value remaining
+experiment, because it attacks the term that actually dominates.
+
+### Verdict: this version is NOT shippable
+
+`flat_qty_update_5` and `flat_qty_update_50` have the **identical median of
+1500 ns**. A 5-level delta costs exactly what a 50-level delta costs. The bytes
+column says the same thing without statistics: 32000 bytes every single time,
+mean = median = p99 = max, which is precisely 2 sides x 1000 levels x 16 bytes
+- the whole book, rewritten to change five quantities.
+
+This first version applies a delta by merging the whole side into a scratch
+buffer and swapping. Cost is O(book size), not O(delta size).
+
+KEY: the blocking problem is not the speed, it is the SCALING. The live
+Binance book grows without bound - its diff stream reports changes across a
+~$30,000 price range and nothing trims it (consolidated_book.h). An O(book)
+apply on an unbounded book moves more memory the longer the process runs. The
+in-place version's cost depends on the DELTA, which the venue bounds for us, so
+it is indifferent to book growth. That is a stability argument, not a
+performance one, and it is why the in-place version is required rather than
+optional.
+
+Expected after the in-place change: quantity-only diffs move **0 bytes** and
+cost O(delta); the 16% merge win becomes net gain instead of paying for a 5x
+apply regression.
+
+### Corrected from the 5000-iteration run
+
+At 5000 iterations `flat_churn_20x2` measured 3042 ns against the map's 3750 -
+i.e. the flat book looked FASTER on churn. At 20000 it is 2708 against 2167,
+i.e. 25% slower. The 5000-iteration reading was noise; the 20000 one stands.
+Recorded because the wrong number was briefly believed.
+
+### Not measured
+
+- Live end-to-end publish latency with the flat book. Every number here is the
+  hot-cache micro-benchmark. The live `merge` median was 50.9 us against this
+  benchmark's ~9-11 us, so the production merge is dominated by effects this
+  loop does not reproduce, and the flat book's live gain is UNKNOWN.
+- The production gap should be WIDER than measured here in the merge: the hot
+  loop keeps tree nodes in cache, which flatters `std::map`, while a sequential
+  scan over contiguous memory prefetches whether it starts cold or hot.
+  Direction is defensible; magnitude is not claimed.
+- AoS vs SoA for `PriceLevel` (splitting price and qty into separate vectors).
+  The merge's selection loop reads only `price`, so SoA would fit 8 prices per
+  cache line instead of 4 - but it doubles the memmoves. Not attempted.
+
+---
+
+## 2026-09-05 - FlatOrderBook in-place apply: the regression is gone
+
+The version recorded above rebuilt the whole side on every message - O(book),
+32000 bytes/diff - which made it unshippable regardless of the merge win. This
+entry is the fix, measured.
+
+`ApplySide` now walks the book ONCE, backward from `back()` (the best price),
+against the delta best-first, and stops the moment the delta is exhausted. It
+writes matched quantities in place as it goes. Only if a level actually enters
+or leaves does `Relocate` rewrite the touched region.
+
+All numbers below are ONE run, 20000 iterations, medians. Cross-run comparison
+is not valid here and is not attempted - see below.
+
+### Within-run results
+
+| | map | flat | |
+|---|---|---|---|
+| `churn_top_20x2` | 1833 ns | **167 ns** | flat **11.0x faster** |
+| `churn_20x2` (deep) | 2000 | 3333 | flat 1.67x SLOWER |
+| `qty_update_50` | 208 | 84 | flat 2.5x faster |
+| `qty_update_5` | 0 | 0 | below the timer floor - no result |
+| `merge_full` | 11166 | 9333 | flat 1.20x faster |
+| `iterate_only` | 9833 | 584 | flat 16.8x faster |
+
+Bytes memmoved per diff (write-back only; staging costs an equal pass again):
+
+    flat_qty_update_50       0 bytes    was 32000
+    flat_churn_top_20x2    640 bytes
+    flat_churn_20x2      32576 bytes    was 63360
+
+### The asymmetry IS the design
+
+    flat:  deep 3333  vs  top 167    ->  20x
+    map:   deep 2000  vs  top 1833   ->  1.09x
+
+std::map does not care where in the book an edit lands - a node is a node. The
+flat book cares enormously, because its cost is set by how deep the delta
+reaches and the best price lives at back(). That is the reverse layout doing
+exactly its job: real churn concentrates at the top of book, and that is the
+end that was made cheap.
+
+`churn_top_20x2` was added for this entry precisely so the deep arm does not
+stand alone. Reporting only the deep case measures the flat book at its worst;
+reporting only the shallow case flatters it. Both, or neither.
+
+### Removing the top of book is FREE
+
+640 bytes is exactly half what a naive count predicts (20 levels x 16 bytes x
+2 sides x 2 updates = 1280), and the reason is worth knowing:
+
+- ERASE the top 20 of a 1000-level side: `deepest` = 980, region = [980, 1000),
+  all 20 erased, so the merged region is EMPTY - nothing to copy back, just a
+  resize down. **Zero bytes.**
+- INSERT 20 new best prices: region is empty, 20 inserts -> 320 bytes/side.
+
+640 = 2 sides x 20 levels x 16 bytes, all of it from the insert half.
+
+### The deep case is a real loss, and it is not being hidden
+
+A structural edit 500 levels deep costs two passes over half the book, which is
+more than std::map's 40 node operations. It is still net positive per depth
+update, because each one pays an apply AND a merge:
+
+    deep structural apply   +1333 ns
+    merge                   -1833 ns
+                            ---------
+                             -500 ns    still ahead
+
+Top-of-book churn is -1666 ns on the apply alone, before the merge saving.
+
+### The bug the oracle caught - worth keeping
+
+The first in-place version chose its walk direction from the NET size change:
+backward when growing, forward when shrinking. That is wrong, and
+`RandomMultiLevelDeltasMatchTheMapOracle` failed at update 10.
+
+    book  [96, 97, 98, 99]     delta best-first:  100 -> 5,  98 -> 0
+    inserts 1, erases 1, net 0  ->  rule picks BACKWARD
+    first step writes the new 100 into side[3], which still held 99
+
+In the backward pass `write - read` starts at inserts - erases and each insert
+shrinks it, so meeting the inserts first drives it negative. The forward pass
+fails the mirror image. ANY delta holding both an insert and an erase can break
+either direction depending on the order they appear in.
+
+KEY: the corruption is SILENT - the side stays sorted and stays the right
+length, with one level's data duplicated. Nothing but an oracle comparing full
+sequences against an independent implementation would have found it. This is
+the concrete payoff for keeping the std::map book (CLAUDE.md section 6).
+
+The fix stages the merged region through a buffer, so the destination is never
+an input and the aliasing question does not arise. Cost: two write passes over
+the region instead of one. Still O(region), never O(book).
+
+### Methodology note, again
+
+`qty_update_50` on UNCHANGED std::map code read 209 ns in one run and 500 ns in
+the next - 2.4x drift on identical code. Every comparison in this entry is
+within a single run for that reason. An earlier draft of this analysis compared
+churn across runs (2708 -> 4458 -> 2833) and drew conclusions from it; that was
+wrong and none of it is repeated here.
+
+### Known limitation of the fixtures
+
+Both delta fixtures emit levels WORST-FIRST (offset increasing), which is
+storage order for the flat book. Real venues send BEST-FIRST. So `ApplySide`'s
+order detection succeeds on its first scan here, while in production it fails
+and runs a second - the benchmark under-measures that detection cost by roughly
+half. Not corrected, because changing the fixtures would move every existing
+number in this file.
+
+### Still not measured
+
+- Live end-to-end publish latency with the flat book. Everything here is the
+  hot-cache micro-benchmark; the live `merge` median was 50.9 us against this
+  benchmark's ~9-11 us.
+- The real mix of quantity-only versus structural deltas in a live feed. That
+  ratio decides which arm above dominates in production, and nothing in the
+  repo measures it. A fast-path / relocate counter on the book would settle it.

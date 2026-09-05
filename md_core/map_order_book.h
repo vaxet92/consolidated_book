@@ -13,9 +13,9 @@ namespace market_data {
 template <typename Compare>
 using OrderBookType = std::map<PriceTicks, QtyUnits, Compare>;
 
-class VenueBook {
+class MapOrderBook {
    public:
-    VenueBook(VenueId venue, InstrumentKey instrument);
+    MapOrderBook(VenueId venue, InstrumentKey instrument);
 
     void ApplyUpdate(const BookUpdate& update);
 
@@ -46,12 +46,12 @@ class VenueBook {
     VenueId venue_;
     InstrumentKey instrument_;
     uint64_t last_seq_ = 0;
-    int64_t last_update_mono_ns_ = 0;  // 0 = never received anything
+    int64_t last_update_mono_ns_ = 0;               // 0 = never received anything
     OrderBookType<std::greater<PriceTicks>> bids_;  // descending: begin() = best bid
     OrderBookType<std::less<PriceTicks>> asks_;     // ascending: begin() = best ask
 };
 
-// One VenueBook per venue. A null entry means that venue isn't configured for
+// One MapOrderBook per venue. A null entry means that venue isn't configured for
 // this instrument.
 //
 // Sized by kMaxVenues (fixed CAPACITY) rather than kVenueCount (compile-time
@@ -73,13 +73,13 @@ class VenueBook {
 // worth avoiding. It does spread the live entries further apart, which is the
 // kind of cache effect §17.9 warns about; not measurable at this size, but
 // stated rather than skipped.
-using VenueBookArray = std::array<std::unique_ptr<VenueBook>, kMaxVenues>;
+using MapOrderBookArray = std::array<std::unique_ptr<MapOrderBook>, kMaxVenues>;
 
 class PrintHelper {
    public:
     static void Level(const char* side, const PriceLevel& level);
-    static void BBO(const VenueBook& book);
-    static void Book(const VenueBook& book);
+    static void BBO(const MapOrderBook& book);
+    static void Book(const MapOrderBook& book);
 };
 
 }  // namespace market_data

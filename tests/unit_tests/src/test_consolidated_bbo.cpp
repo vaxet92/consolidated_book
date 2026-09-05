@@ -18,8 +18,9 @@ BookUpdate MakeSnapshot(std::vector<PriceLevel> bids, std::vector<PriceLevel> as
     return update;
 }
 
-void SetBook(VenueBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
-    books[static_cast<size_t>(venue)] = std::make_unique<VenueBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+void SetBook(MapOrderBookArray& books, VenueId venue, std::vector<PriceLevel> bids, std::vector<PriceLevel> asks) {
+    books[static_cast<size_t>(venue)] =
+        std::make_unique<MapOrderBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     books[static_cast<size_t>(venue)]->ApplyUpdate(MakeSnapshot(std::move(bids), std::move(asks)));
 }
 
@@ -40,7 +41,9 @@ BboQuote MakeQuote(VenueId venue, PriceTicks bid_px, QtyUnits bid_qty, PriceTick
 // that choice once rather than repeating the cast at each call site, and marks
 // the places that would need revisiting if a test ever wants a different
 // layout (DESIGN.md §17.6).
-constexpr VenueSlot SlotOf(VenueId venue) { return static_cast<VenueSlot>(static_cast<size_t>(venue)); }
+constexpr VenueSlot SlotOf(VenueId venue) {
+    return static_cast<VenueSlot>(static_cast<size_t>(venue));
+}
 
 // Applies a quote the way Core does: store into the array FIRST (the rescan
 // path re-reads it), then fold it in.
@@ -73,7 +76,7 @@ void ExpectSameVenues(const std::vector<consolidated::VenueQuote>& a, const std:
 }  // namespace
 
 TEST(ConsolidatedBboTest, EmptyBooksHaveNoConsolidatedBBO) {
-    VenueBookArray books{};  // all null - no venue configured
+    MapOrderBookArray books{};  // all null - no venue configured
 
     auto bbo = consolidated::ComputeBBO(books);
 
@@ -85,7 +88,7 @@ TEST(ConsolidatedBboTest, EmptyBooksHaveNoConsolidatedBBO) {
 }
 
 TEST(ConsolidatedBboTest, SingleVenueContributesBBO) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 7}});
 
     auto bbo = consolidated::ComputeBBO(books);
@@ -100,7 +103,7 @@ TEST(ConsolidatedBboTest, SingleVenueContributesBBO) {
 }
 
 TEST(ConsolidatedBboTest, HighestBidWinsAcrossVenues) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {});
     SetBook(books, VenueId::OKX, {{102, 3}}, {});
     SetBook(books, VenueId::BYBIT, {{99, 1}}, {});
@@ -114,7 +117,7 @@ TEST(ConsolidatedBboTest, HighestBidWinsAcrossVenues) {
 }
 
 TEST(ConsolidatedBboTest, TiedBidsAtBestPriceAreSummedWithAttribution) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {});
     SetBook(books, VenueId::OKX, {{100, 3}}, {});
     SetBook(books, VenueId::BYBIT, {{95, 1}}, {});
@@ -127,7 +130,7 @@ TEST(ConsolidatedBboTest, TiedBidsAtBestPriceAreSummedWithAttribution) {
 }
 
 TEST(ConsolidatedBboTest, LowestAskWinsAcrossVenues) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {}, {{105, 2}});
     SetBook(books, VenueId::OKX, {}, {{103, 4}});
 
@@ -138,7 +141,7 @@ TEST(ConsolidatedBboTest, LowestAskWinsAcrossVenues) {
 }
 
 TEST(ConsolidatedBboTest, NonCrossedBookIsNotFlagged) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{100, 5}}, {{101, 7}});
 
     auto bbo = consolidated::ComputeBBO(books);
@@ -147,7 +150,7 @@ TEST(ConsolidatedBboTest, NonCrossedBookIsNotFlagged) {
 }
 
 TEST(ConsolidatedBboTest, CrossedBookSetsFlag) {
-    VenueBookArray books{};
+    MapOrderBookArray books{};
     SetBook(books, VenueId::BINANCE, {{105, 5}}, {});  // bid above the other venue's ask
     SetBook(books, VenueId::OKX, {}, {{100, 7}});
 
@@ -198,7 +201,7 @@ TEST(ConsolidatedBboTest, IncrementalTiedLevelLosingOneVenueKeepsTheOther) {
 // UpdateBBOWithQuote maintains persistent state, so a bug accumulates
 // silently instead of failing loudly. Drive a random stream through it and
 // assert after EVERY update that it exactly equals a full rescan - the same
-// oracle role std::map plays for VenueBook (DESIGN_1 §5.1).
+// oracle role std::map plays for MapOrderBook (DESIGN_1 §5.1).
 TEST(ConsolidatedBboTest, IncrementalMatchesFullScanOverRandomStream) {
     std::mt19937 rng(12345);  // fixed seed - reproducible failures
 
@@ -231,7 +234,7 @@ TEST(ConsolidatedBboTest, IncrementalMatchesFullScanOverRandomStream) {
 }
 
 TEST(ConsolidatedBboTest, UnconfiguredVenueSlotIsSkippedNotCrashed) {
-    VenueBookArray books{};  // every slot null except one
+    MapOrderBookArray books{};  // every slot null except one
     SetBook(books, VenueId::BYBIT, {{100, 5}}, {{101, 7}});
 
     auto bbo = consolidated::ComputeBBO(books);

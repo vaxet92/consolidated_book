@@ -14,7 +14,7 @@ Four services:
 
 The three `*_sub` binaries exist to exercise one feed in isolation while debugging. `client_app` is what actually ships — all four share `client_common` for connection handling, gap detection and formatting.
 
-> **Status: working end-to-end against live exchange data.** All three feeds publish, and the whole system runs under docker-compose. The staleness policy is not built, and the only benchmark is the Binance parser's — see [Known limitations](#known-limitations).
+> **Status: working end-to-end against live exchange data.** All three feeds publish, spot and futures both run, and the whole system runs under docker-compose. The staleness policy is built; `VenueStatus` is not yet populated on the wire. Benchmarks cover the Binance parser and the book hot path (apply, k-way merge, traversal, BBO, bytes-moved-per-diff) — see [Known limitations](#known-limitations) and `becnhmark_results.md`.
 
 ---
 
@@ -100,15 +100,17 @@ Each decision below lists what was chosen, why, and what was rejected. The full 
 
 **Three exchange threads parse. `Core` owns all the books, guarded by one mutex.**
 
-Each exchange has its own thread doing WebSocket receive, TLS decrypt and JSON parse. Each then calls `Core::ApplyUpdate` (depth) or `Core::ApplyQuote` (fast-BBO) **directly**, and a single `std::mutex` inside `Core` serializes them.
+Each exchange has its own thread doing WebSocket receive, TLS decrypt and JSON parse. Each then pushes into **its own SPSC ring buffer** and returns immediately. One consolidator thread drains all of them, owns every book, and does the merge and publish. There is **no lock on the book path**.
 
-**This is not the design described below, and the difference is worth being explicit about.** The intended architecture — per-venue SPSC ring buffers drained by one dedicated consolidator thread, with no lock anywhere on the book path — is the right shape and is analyzed in the rejected-alternatives section that follows. It was **not built**. What exists is the interim mutex, marked as such in `md_core.h`.
+**This was the interim mutex until 2e4820e, and the measurement is the interesting part.** Replacing an uncontended mutex with lock-free queues made the median publish latency **worse** — 76.1 µs to 113.3 µs — because the consolidator kept finding the queues empty, sleeping, and paying a ~37 µs wakeup on nearly every message. It only beat the mutex once it **spun before sleeping**: 73.8 µs, with `lock_wait` at 0.0 µs.
 
-What that costs: the three parser threads contend on one lock, and the merge plus band publish happens inside the critical section rather than on a separate thread. At the rates the public channels actually deliver (~100 depth updates/sec combined, ~300 fast-BBO), contention is not measurable — but it is a real ceiling the SPSC design would not have.
+> The lesson is worth stating plainly: removing a lock does not remove the cost, it moves it. Here it moved from lock contention (which was near zero) to thread wakeups (which were not). Full numbers in `becnhmark_results.md`.
 
-What it keeps: the book logic itself is still effectively single-threaded and deterministic, since only one thread is ever inside it. The testability argument survives; the lock-free claim does not.
+The spin window is bounded — `kConsolidatorSpinLimit` — so a dead feed costs ~0% CPU rather than a permanently burned core. Measured cost of the spin under live load: ~15–20% of one core.
 
-**Condition to revisit:** provider threads blocking measurably on `apply_mutex_`, or the merge cost inside the lock becoming visible in publish latency. Neither is measured today — no benchmark covers this path (only the Binance parser has one), which is itself a gap (see [Known limitations](#known-limitations)).
+What this buys beyond latency: the book logic is single-threaded and deterministic, since exactly one thread is ever inside it. That makes it testable with fake input and TSan-clean by construction rather than by care — which was always the stronger argument for this design, and the one that survives regardless of what the microseconds say.
+
+**Condition to revisit:** the consolidator failing to keep up — queue-full events, or publish latency rising with input rate. Both are measured now (`LatencyRecorder("book_publish")` live, `bench_md_core` offline).
 
 ### Rejected: each exchange thread owns its own book, with a seqlock for the reader
 
@@ -130,7 +132,7 @@ There is also a latency argument. Binance sends `depth@100ms`, which means the e
 
 Against that, a seqlock is easy to write and hard to write *correctly*. A mistake in memory ordering produces a silently wrong order book at a low rate. In a two-week project that is the worst possible failure mode, because you will not find it.
 
-**Condition to revisit:** consolidator CPU above about 50% of one core, which is roughly 50,000 updates per second. Reaching that needs tick-by-tick channels rather than the throttled public ones. The benchmark that would detect it (merge + derive per tick) is not built; only the Binance parser has one.
+**Condition to revisit:** consolidator CPU above about 50% of one core, which is roughly 50,000 updates per second. Reaching that needs tick-by-tick channels rather than the throttled public ones. `benchmarks/bench_md_core.cpp` is the benchmark that would detect it — merge, apply and traversal are all measured now.
 
 For completeness, the third option — `shared_mutex` with multiple readers — is the worst of the three. Under contention it becomes a futex syscall, and readers block the writer. That is backwards here: the writer is on the latency path and the reader is a periodic publisher.
 
@@ -154,15 +156,39 @@ Each venue has a parser class (`BinanceParser`, `OkxParser`, `BybitParser`) over
 
 Simpler — no lifetime rule — but it re-allocates simdjson's working buffers and the level vectors on every message. Measured on the Binance parser: **~2–3× slower**. bookTicker went ~370 ns → ~120 ns, a 10-level-per-side depth delta ~1500 ns → ~600 ns (laptop, `-O3`, not pinned; see `benchmarks/bench_binance_parser.cpp`).
 
+## The per-venue book: reverse-ordered flat vectors, with `std::map` kept as an oracle
+
+Each venue's book is two sorted `std::vector<PriceLevel>` — **worst price first, best price at `back()`**. The `std::map` implementation is still compiled, linked and tested as `MapOrderBook`; `MergeBooks` and `ComputeBBO` are templated on the book array and instantiated for both, so the two run as arms of the *same* benchmark process and are driven by one property test.
+
+**Why the best price is at the back.** Nearly every update lands at the top of book, and `back()` is the only end of a vector that is cheap to grow and shrink. With the best bid at `front()` — which is what the design document originally specified — a new best bid memmoves the entire book, ~16 KB at 1000 levels. At `back()` it is a `push_back`, and removing it is a `pop_back`. The cost is that readers walk backwards, which is close to free: prefetchers handle descending strides too.
+
+**Measured**, one run, 20 000 iterations, both books in one process:
+
+| | `std::map` | flat | |
+|---|---|---|---|
+| traversal only | 9833 ns | **584 ns** | 16.8× |
+| top-of-book churn (20 erase + 20 insert) | 1833 ns | **167 ns** | 11.0× |
+| same churn 500 levels deep | 2000 ns | 3333 ns | **1.67× slower** |
+| quantity-only delta, 50 levels | 208 ns | 84 ns | 2.5× |
+| full merge | 11 166 ns | 9333 ns | 1.20× |
+
+Quantity-only deltas move **zero bytes** — the common case in a live feed — and erasing the top of book is free, because the region above the deepest touched level is empty. The deep-churn loss is real and stated rather than hidden; it stays net positive per depth update, since each one pays an apply *and* a merge.
+
+**Two things here are worth more than the speedup.**
+
+*The hypothesis was wrong, and the measurement said so.* The design document predicted the flat book would remove most of the merge cost, reasoning that pure traversal (`iterate_only`) cost about as much as the whole merge, so the merge must essentially *be* traversal. Traversal then fell 16.8× and the merge improved **16%**. Two costs being equal is not evidence that one causes the other. The merge is **write-bound**: `MergedLevel` is 176 bytes and a full merge writes ~352 KB of output against ~77 KB of input read.
+
+*The oracle earned its keep on the first day.* The first in-place implementation chose its walk direction from the net size change, which is wrong whenever one delta contains both an insert and an erase — it writes into a slot it has not read yet. The resulting book was still **sorted and still the right length**, with one level's data duplicated. No assertion, no crash, no sanitizer finding. Only comparing full sequences against an independent implementation caught it.
+
 ## Consolidation: three books merged fresh, never one shared book
 
-`Core` keeps three separate `VenueBook`s and rebuilds the merged view from them, rather than maintaining one shared consolidated book that every update writes into.
+`Core` keeps three separate `MapOrderBook`s and rebuilds the merged view from them, rather than maintaining one shared consolidated book that every update writes into.
 
 **Removing an exchange stays cheap.** If one feed breaks and must be excluded, the merge simply skips it — one `if`. In a shared consolidated book its quantities are already mixed into every price level, so excluding it means walking the whole book and subtracting, then walking it again to add it back on recovery. A resync after a sequence gap is worse: the whole book is replaced.
 
 **When the merge runs changed during implementation.** The original plan was to merge only at publish time, on the reasoning that updates arrive faster than we publish. That stopped applying once publishing became eager: **every depth update now triggers a full k-way merge immediately**, and the result is handed out as an immutable `shared_ptr<const Book>` snapshot. Publish time *is* update time; there is no separate publish clock to amortize against.
 
-That is a deliberate trade, not an oversight. It is the simplest thing that is correct, it matches the same eager choice made for BBO, and at ~100 depth updates/sec against a merge estimated in low single-digit microseconds there is wide headroom. It is also unmeasured — see [Hot paths](#hot-paths-not-yet-optimized).
+That is a deliberate trade, not an oversight. It is the simplest thing that is correct, and it matches the same eager choice made for BBO. It is now **measured**, not estimated: the merge is 9–11 µs hot-cache at 1000 levels and **50.9 µs live** — the gap being cache eviction between merges, which the benchmark cannot reproduce. Against ~25 depth publishes/sec that is still wide headroom, but it is 69% of publish latency and therefore the thing to attack first. See [Hot paths](#hot-paths-not-yet-optimized).
 
 The best bid and offer take a different path entirely: they are driven by the venues' fast-BBO channels, cached per exchange, and consolidated incrementally rather than by merging depth at all.
 
@@ -275,9 +301,13 @@ The 1000bps band is 10% away from the BBO, which is deeper than any public depth
 
 That flag was originally omitted from price bands, on the reasoning that "how much is within X bps" is fully answered by "not much". That reasoning was wrong: it holds when the *market* ends, but not when *our own depth budget* ends — and on the wire the two were indistinguishable. A truncated 1000bps band looked exactly like a complete one.
 
-## Spot only
+## Spot and futures, never in one book
 
-Spot BTCUSDT on all three exchanges. Spot and perpetual futures are different instruments at different prices, so mixing them into one book would be a correctness bug rather than a rounding artifact. This is checked at startup, not only documented. The exchange adapter interface supports futures without changes above it.
+Both are supported on all three exchanges. Spot and perpetual futures are different instruments at different prices, so mixing them into one book would be a correctness bug rather than a rounding artifact.
+
+That separation is structural, not a check that could be forgotten. Every book, health array and queue is keyed by `InstrumentKey`, which packs symbol **and** market into one `uint32_t` — so spot and futures land in different entries and there is no code path that could merge them. The gRPC `SubscribeRequest` requires a market and **rejects `MARKET_UNSPECIFIED`**: a proto3 enum has no presence, so "forgot to set it" and "chose zero" are the same bytes on the wire, and serving spot by default would silently give a futures client the wrong instrument.
+
+One market per aggregator process, selected in `server_config.json`. Running both at once means two processes — they share no book, no health state and no queue, so the market is the natural process boundary and a futures resync storm cannot stall the spot book.
 
 ## WebSocket for updates, REST only for the initial snapshot
 
@@ -327,12 +357,13 @@ A *genuine* venue reset (OKX maintenance, Bybit `u == 1`) does move the mark bac
 
 # Hot paths not yet optimized
 
-Everything here is a **known cost accepted deliberately**, not an oversight. Only the Binance JSON parser has a latency benchmark (`benchmarks/`, built with `-DBUILD_BENCHMARKS=ON`); none of the paths below are measured yet, which is the first thing to fix before optimizing any of them.
+Everything here is a **known cost accepted deliberately**, not an oversight. The book hot path and the Binance parser both have benchmarks (`benchmarks/`, built with `-DBUILD_BENCHMARKS=ON`), and the rows below say which entries are measured and which are still estimates.
 
 | Path | Cost | Fix, when a number justifies it |
 |---|---|---|
-| **Eager merge per depth update** (`Core::ApplyUpdate`) | Full k-way merge over up to `kDefaultMaxDepth` levels × 3 venues on **every** depth message, inside `apply_mutex_` | Throttle the merge to a fixed cadence, or merge incrementally. Estimated low single-digit µs against ~100 updates/sec — wide headroom, but unverified |
-| **`apply_mutex_` in `Core`** | Three provider threads serialize on one lock; merge and publish happen inside the critical section | The SPSC-queue design in [Threading](#threading-and-ownership) — removes the lock from the book path entirely |
+| **`MergedLevel` is 176 bytes** | 128 of them are a `venues[8]` attribution array with **three** entries ever used. A full merge writes ~2000 levels — ~352 KB — against ~77 KB read. **MEASURED: this is what the merge actually spends its time on** | Shrink it. An earlier attempt (176 → 48 bytes) measured **40% slower**, but that was with `std::map` input when traversal cost 9833 ns and dominated; at 584 ns those conditions no longer hold and it should be re-run |
+| **Eager merge per depth update** (`Core::ApplyUpdate`) | Full k-way merge over up to `kDefaultMaxDepth` levels × 3 venues on **every** depth message. **MEASURED: 9–11 µs hot-cache, 50.9 µs live — 69% of publish latency** | Shrink `MergedLevel` first (row above). Incremental merging is analysed and rejected for now: it forfeits the stateless merge that makes excluding a stale venue free |
+| **Structural deltas deep in the book** | The flat book rewrites everything above the deepest level a delta touches. **MEASURED: 1.67× slower than `std::map`** at 500 levels deep; 11× *faster* at the top | Nothing yet. Real churn concentrates at the top of book, and the unknown is what fraction of live deltas are deep — a fast-path/relocate counter would settle it |
 | **Band vectors in `PublishBook`** | Four `std::vector`s allocated per session per publish | Scratch buffers reused across publishes. Safe because it already runs under `sessions_mutex_` |
 | **`sessions_mutex_` held across band math** | All per-session band computation happens inside the lock, blocking subscribe/unsubscribe | Snapshot the session list, compute outside the lock. Only matters with many clients |
 | **`Book` snapshot allocation** | `AcquireBookBuffer` reuses buffers when `use_count() == 1`, but grows the pool if every buffer is still referenced | Bounded pool with a defined policy when exhausted. Currently assumes no slow subscriber |

@@ -34,7 +34,8 @@
 #include "latency_benchmark.h"
 #include "md_core/consolidated_bbo.h"
 #include "md_core/consolidated_book.h"
-#include "md_core/venue_book.h"
+#include "md_core/flat_order_book.h"
+#include "md_core/map_order_book.h"
 
 using namespace market_data;
 using namespace market_data::consolidated;
@@ -113,10 +114,56 @@ BookUpdate MakeSnapshot(VenueId venue, size_t levels) {
     return update;
 }
 
-std::unique_ptr<VenueBook> MakeBook(VenueId venue, size_t levels) {
-    auto book = std::make_unique<VenueBook>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
+// Templated on the book type so the SAME fixture builds a std::map book and a
+// flat one from identical input. Any difference the benchmark then reports is a
+// difference between the implementations, not between two fixtures.
+template <typename Book>
+std::unique_ptr<Book> MakeBook(VenueId venue, size_t levels) {
+    auto book = std::make_unique<Book>(venue, MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot));
     book->ApplyUpdate(MakeSnapshot(venue, levels));
     return book;
+}
+
+// Median / p99 / max of a sample set, sorted in place.
+//
+// KEY: this summarises BYTES MOVED, and that column exists only for the flat
+// book. std::map moves no bytes at all - it allocates and frees nodes - so an
+// empty cell there is not a zero, and the two implementations are simply not
+// comparable on this metric. They are compared on ns/call instead.
+//
+// Bytes moved is reported because it is the figure that TRANSFERS: nanoseconds
+// describe this laptop, while bytes moved describe the algorithm and predict it
+// on any machine. The p99 is the point of it - once the in-place version lands
+// the mean should sit near zero, and the only interesting case left is a new
+// price at the top of a deep book, which a median hides completely.
+struct MovedStats {
+    double mean = 0.0;
+    uint64_t median = 0;
+    uint64_t p99 = 0;
+    uint64_t max = 0;
+};
+
+MovedStats SummariseMoved(std::vector<uint64_t>& samples) {
+    MovedStats stats;
+    if (samples.empty()) {
+        return stats;
+    }
+    std::sort(samples.begin(), samples.end());
+    long double total = 0.0L;
+    for (uint64_t value : samples) {
+        total += static_cast<long double>(value);
+    }
+    stats.mean = static_cast<double>(total / static_cast<long double>(samples.size()));
+    stats.median = samples[samples.size() / 2];
+    stats.p99 = samples[static_cast<size_t>(static_cast<double>(samples.size()) * 0.99)];
+    stats.max = samples.back();
+    return stats;
+}
+
+void PrintMoved(const char* name, MovedStats stats) {
+    std::printf("  %-20s  mean %10.1f  median %8llu  p99 %8llu  max %8llu  bytes/diff\n", name, stats.mean,
+                static_cast<unsigned long long>(stats.median), static_cast<unsigned long long>(stats.p99),
+                static_cast<unsigned long long>(stats.max));
 }
 
 // Runtime-settable, because the right values are an empirical question and
@@ -145,13 +192,15 @@ struct Fixture {
 // of 333 levels produce 333 output levels while one venue of 1000 produces
 // 1000 - splitting a fixed total would change the output size and the
 // comparison would measure that instead of the selection cost.
-void FillIsolation(VenueBookArray& books, size_t venue_count, size_t depth) {
+template <typename BookArray>
+void FillIsolation(BookArray& books, size_t venue_count, size_t depth) {
+    using Book = typename BookArray::value_type::element_type;
     for (auto& book : books) {
         book.reset();
     }
     static constexpr VenueId kOrder[] = {VenueId::BINANCE, VenueId::OKX, VenueId::BYBIT};
     for (size_t i = 0; i < venue_count; ++i) {
-        books[static_cast<size_t>(kOrder[i])] = MakeBook(kOrder[i], depth);
+        books[static_cast<size_t>(kOrder[i])] = MakeBook<Book>(kOrder[i], depth);
     }
 }
 
@@ -159,13 +208,15 @@ void FillIsolation(VenueBookArray& books, size_t venue_count, size_t depth) {
 // Merged output is the DEEPEST venue's depth, not the sum, because they
 // overlap - with the defaults that is Bybit's 1000, where levels 1-400 have
 // three contributors, 401-500 have two, and the rest have one.
-void FillRealistic(VenueBookArray& books, const Fixture& fixture) {
+template <typename BookArray>
+void FillRealistic(BookArray& books, const Fixture& fixture) {
+    using Book = typename BookArray::value_type::element_type;
     for (auto& book : books) {
         book.reset();
     }
-    books[static_cast<size_t>(VenueId::BINANCE)] = MakeBook(VenueId::BINANCE, fixture.binance);
-    books[static_cast<size_t>(VenueId::OKX)] = MakeBook(VenueId::OKX, fixture.okx);
-    books[static_cast<size_t>(VenueId::BYBIT)] = MakeBook(VenueId::BYBIT, fixture.bybit);
+    books[static_cast<size_t>(VenueId::BINANCE)] = MakeBook<Book>(VenueId::BINANCE, fixture.binance);
+    books[static_cast<size_t>(VenueId::OKX)] = MakeBook<Book>(VenueId::OKX, fixture.okx);
+    books[static_cast<size_t>(VenueId::BYBIT)] = MakeBook<Book>(VenueId::BYBIT, fixture.bybit);
 }
 
 // Minimal --key=value parsing. Not worth a config library in a benchmark.
@@ -212,7 +263,19 @@ struct ChurnDeltas {
     BookUpdate add;
 };
 
-ChurnDeltas MakeChurn(size_t levels) {
+// `start_offset` is in ticks from the mid. 500 puts the churn deep in the book,
+// away from the top, so it does not also change the best price; 1 puts it AT
+// the best price and the 19 levels behind it (MakeSnapshot lays levels at
+// offsets 1..N, so offset 1 is the top of book).
+//
+// KEY: the pair exists to separate two cases the flat book treats very
+// differently. Its cost is set by how DEEP the delta reaches - the best price
+// lives at back(), so a top-of-book structural change rewrites a handful of
+// levels while a deep one rewrites everything above it. std::map has no such
+// asymmetry: a node is a node wherever it sits. Reporting only the deep arm
+// measures the flat book at its worst; reporting only the shallow one flatters
+// it. Both, or neither.
+ChurnDeltas MakeChurn(size_t levels, size_t start_offset) {
     ChurnDeltas churn;
     for (BookUpdate* update : {&churn.remove, &churn.add}) {
         update->venue = VenueId::BINANCE;
@@ -221,10 +284,7 @@ ChurnDeltas MakeChurn(size_t levels) {
         update->is_snapshot = false;
     }
     for (size_t i = 0; i < levels; ++i) {
-        // Deep in the book, away from the top, so the churn does not also
-        // change the best price on every call - that would measure a
-        // different thing.
-        const PriceTicks offset = static_cast<PriceTicks>(500 + i) * kTick;
+        const PriceTicks offset = static_cast<PriceTicks>(start_offset + i) * kTick;
         churn.remove.bids.push_back({kMidPrice - offset, 0});
         churn.remove.asks.push_back({kMidPrice + offset, 0});
         churn.add.bids.push_back({kMidPrice - offset, 2 * kScaleFactor});
@@ -274,13 +334,19 @@ int main(int argc, char** argv) {
 
     LatencyBenchmark bench(iterations, warmup);
 
-    // ---- 1. per-venue apply ------------------------------------------------
-    std::printf("VenueBook::ApplyUpdate\n");
-    {
-        auto book = MakeBook(VenueId::BINANCE, kBinanceLevels);
+    const BookUpdate qty_small = MakeQtyUpdate(5);
+    const BookUpdate qty_deep = MakeQtyUpdate(50);
+    // Erase then re-insert, so the book size is unchanged per call. The
+    // reported cost is for BOTH halves together - 20 erases plus 20 inserts -
+    // not for one of them.
+    const ChurnDeltas churn = MakeChurn(20, 500);
+    const ChurnDeltas churn_top = MakeChurn(20, 1);
 
-        const BookUpdate qty_small = MakeQtyUpdate(5);
-        const BookUpdate qty_deep = MakeQtyUpdate(50);
+    // ---- 1. per-venue apply ------------------------------------------------
+    std::printf("MapOrderBook::ApplyUpdate  (std::map)\n");
+    {
+        auto book = MakeBook<MapOrderBook>(VenueId::BINANCE, kBinanceLevels);
+
         bench.Measure("qty_update_5", [&] {
             book->ApplyUpdate(qty_small);
             return book->last_seq();
@@ -289,14 +355,57 @@ int main(int argc, char** argv) {
             book->ApplyUpdate(qty_deep);
             return book->last_seq();
         });
-
-        // Erase then re-insert, so the book size is unchanged per call. The
-        // reported cost is for BOTH halves together - 20 erases plus 20
-        // inserts - not for one of them.
-        const ChurnDeltas churn = MakeChurn(20);
         bench.Measure("churn_20x2", [&] {
             book->ApplyUpdate(churn.remove);
             book->ApplyUpdate(churn.add);
+            return book->bids().size();
+        });
+        bench.Measure("churn_top_20x2", [&] {
+            book->ApplyUpdate(churn_top.remove);
+            book->ApplyUpdate(churn_top.add);
+            return book->bids().size();
+        });
+    }
+
+    // ---- 1b. the same applies against the flat book ------------------------
+    //
+    // Identical fixture, identical deltas, SAME RUN - so this is a comparison
+    // between two implementations and not between two machine states. That
+    // matters: becnhmark_results.md records a case where two runs days apart
+    // mixed a real 40% regression with drift, and the fix was to read ratios
+    // within one run. Both books living in one process removes the problem
+    // rather than correcting for it.
+    std::printf("\nFlatOrderBook::ApplyUpdate  (sorted vector)\n");
+    std::vector<uint64_t> moved_qty_deep;
+    std::vector<uint64_t> moved_churn;
+    std::vector<uint64_t> moved_churn_top;
+    {
+        auto book = MakeBook<FlatOrderBook>(VenueId::BINANCE, kBinanceLevels);
+        moved_qty_deep.reserve(iterations);
+        moved_churn.reserve(iterations);
+        moved_churn_top.reserve(iterations);
+
+        bench.Measure("flat_qty_update_5", [&] {
+            book->ApplyUpdate(qty_small);
+            return book->last_seq();
+        });
+        bench.Measure("flat_qty_update_50", [&] {
+            book->ApplyUpdate(qty_deep);
+            moved_qty_deep.push_back(book->last_bytes_moved());
+            return book->last_seq();
+        });
+        bench.Measure("flat_churn_20x2", [&] {
+            book->ApplyUpdate(churn.remove);
+            const uint64_t removed = book->last_bytes_moved();
+            book->ApplyUpdate(churn.add);
+            moved_churn.push_back(removed + book->last_bytes_moved());
+            return book->bids().size();
+        });
+        bench.Measure("flat_churn_top_20x2", [&] {
+            book->ApplyUpdate(churn_top.remove);
+            const uint64_t removed = book->last_bytes_moved();
+            book->ApplyUpdate(churn_top.add);
+            moved_churn_top.push_back(removed + book->last_bytes_moved());
             return book->bids().size();
         });
     }
@@ -308,7 +417,7 @@ int main(int argc, char** argv) {
     std::printf("\nMergeBooks - venue count at constant %zu OUTPUT levels\n", fixture.isolation);
     {
         Book merged;
-        VenueBookArray books{};
+        MapOrderBookArray books{};
 
         FillIsolation(books, 1, fixture.isolation);
         bench.Measure("merge_1venue", [&] {
@@ -328,13 +437,35 @@ int main(int argc, char** argv) {
             return merged.bids.size();
         });
     }
+    {
+        Book merged;
+        FlatBookArray books{};
+
+        FillIsolation(books, 1, fixture.isolation);
+        bench.Measure("merge_flat_1venue", [&] {
+            MergeBooks(books, kVenueCount, merged);
+            return merged.bids.size();
+        });
+
+        FillIsolation(books, 2, fixture.isolation);
+        bench.Measure("merge_flat_2venue", [&] {
+            MergeBooks(books, kVenueCount, merged);
+            return merged.bids.size();
+        });
+
+        FillIsolation(books, 3, fixture.isolation);
+        bench.Measure("merge_flat_3venue", [&] {
+            MergeBooks(books, kVenueCount, merged);
+            return merged.bids.size();
+        });
+    }
 
     // ---- 3. the realistic shape, and how cost scales with output depth ------
     std::printf("\nMergeBooks - realistic depths (Binance %zu / OKX %zu / Bybit %zu), by max_depth\n", fixture.binance,
                 fixture.okx, fixture.bybit);
     {
         Book merged;
-        VenueBookArray books{};
+        MapOrderBookArray books{};
         FillRealistic(books, fixture);
 
         bench.Measure("merge_depth_50", [&] {
@@ -346,6 +477,24 @@ int main(int argc, char** argv) {
             return merged.bids.size();
         });
         bench.Measure("merge_full", [&] {
+            MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth);
+            return merged.bids.size();
+        });
+    }
+    {
+        Book merged;
+        FlatBookArray books{};
+        FillRealistic(books, fixture);
+
+        bench.Measure("merge_flat_depth_50", [&] {
+            MergeBooks(books, kVenueCount, merged, 50);
+            return merged.bids.size();
+        });
+        bench.Measure("merge_flat_depth_400", [&] {
+            MergeBooks(books, kVenueCount, merged, 400);
+            return merged.bids.size();
+        });
+        bench.Measure("merge_flat_full", [&] {
             MergeBooks(books, kVenueCount, merged, kDefaultMaxDepth);
             return merged.bids.size();
         });
@@ -362,12 +511,35 @@ int main(int argc, char** argv) {
     //
     // If this dominates, the flat-vector book is the answer and incremental
     // merging (section 14.2 step 16b) is solving the wrong problem.
-    std::printf("\nTree traversal alone (no merge logic)\n");
+    //
+    // It did dominate - iterate_only came in at or above merge_full, meaning
+    // the merge was ~100% traversal - which is why the flat book exists. The
+    // flat arm below is the same walk over contiguous memory, and the pair is
+    // the whole justification for the change, measured in one run.
+    std::printf("\nTraversal alone (no merge logic)\n");
     {
-        VenueBookArray books{};
+        MapOrderBookArray books{};
         FillRealistic(books, fixture);
 
         bench.Measure("iterate_only", [&] {
+            uint64_t sum = 0;
+            for (const auto& book : books) {
+                if (!book) continue;
+                for (const auto& [price, qty] : book->bids()) {
+                    sum += price + qty;
+                }
+                for (const auto& [price, qty] : book->asks()) {
+                    sum += price + qty;
+                }
+            }
+            return sum;
+        });
+    }
+    {
+        FlatBookArray books{};
+        FillRealistic(books, fixture);
+
+        bench.Measure("iterate_flat_only", [&] {
             uint64_t sum = 0;
             for (const auto& book : books) {
                 if (!book) continue;
@@ -422,11 +594,38 @@ int main(int argc, char** argv) {
         });
     }
 
+    // ---- 6. bytes moved, flat book only ------------------------------------
+    std::printf("\nBytes memmoved per diff message  (FlatOrderBook only)\n");
+    {
+        const MovedStats qty_stats = SummariseMoved(moved_qty_deep);
+        const MovedStats churn_stats = SummariseMoved(moved_churn);
+        const MovedStats churn_top_stats = SummariseMoved(moved_churn_top);
+        PrintMoved("flat_qty_update_50", qty_stats);
+        PrintMoved("flat_churn_20x2", churn_stats);
+        PrintMoved("flat_churn_top_20x2", churn_top_stats);
+    }
+    std::printf(
+        "  The two churn rows are the same 20 erases + 20 inserts at different\n"
+        "  DEPTHS: offset 500 vs offset 1. The flat book rewrites everything\n"
+        "  above the deepest level a delta touches, so depth is what sets its\n"
+        "  cost; std::map has no such asymmetry. Both are reported so neither\n"
+        "  the worst case nor the best case stands alone.\n"
+        "  Counted bytes are the WRITE-BACK only - staging costs an equal pass\n"
+        "  again, so true traffic is twice these numbers.\n");
+    std::printf(
+        "  std::map has no row here: it moves no bytes at all, it allocates and\n"
+        "  frees nodes. A blank is NOT a zero, and the two are not comparable on\n"
+        "  this metric - they are compared on ns/call above.\n");
+
     std::printf(
         "\nNOTE: this loop keeps the tree nodes HOT in cache. In production there are\n"
         "milliseconds between merges and those nodes may be evicted, so these numbers\n"
         "UNDERSTATE std::map's disadvantage - the real gap is at least this wide.\n"
-        "Multiply by the measured message rate before drawing any conclusion.\n");
+        "Multiply by the measured message rate before drawing any conclusion.\n"
+        "\n"
+        "The flat book is NOT subject to that caveat in the same way: a sequential\n"
+        "scan over contiguous memory is prefetchable whether it starts cold or hot,\n"
+        "so the map/flat gap measured here is the FLOOR of the production gap.\n");
 
     return 0;
 }

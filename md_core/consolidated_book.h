@@ -2,15 +2,36 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "consolidated_bbo.h"
+#include "flat_order_book.h"
 #include "types.h"
-#include "venue_book.h"
+#include "map_order_book.h"
 #include "venue_health.h"
 
 namespace market_data {
 namespace consolidated {
+
+// Reads the price and the quantity from ONE level of a venue book, whichever
+// implementation it came from: std::map yields pair<const PriceTicks,
+// QtyUnits>, FlatOrderBook yields PriceLevel. Two overloads each, so the merge
+// body is written once and compiled for both instead of duplicated - and two
+// copies of that k-way merge drifting apart is exactly the bug an oracle
+// cannot catch, because it would be checking one copy against itself.
+inline PriceTicks PriceOf(const PriceLevel& level) {
+    return level.price;
+}
+inline QtyUnits QtyOf(const PriceLevel& level) {
+    return level.qty;
+}
+inline PriceTicks PriceOf(const std::pair<const PriceTicks, QtyUnits>& node) {
+    return node.first;
+}
+inline QtyUnits QtyOf(const std::pair<const PriceTicks, QtyUnits>& node) {
+    return node.second;
+}
 
 // One price level of the merged book, with per-venue attribution and the
 // running totals up to and including this level.
@@ -126,7 +147,6 @@ struct Book {
     }
 };
 
-
 // §5.2: N must cover the deepest question asked - the 50M notional band and
 // the 1000bps price band.
 //
@@ -165,7 +185,16 @@ inline constexpr size_t kDefaultMaxDepth = 1500;
 // measured in microseconds. A slot whose venue was removed is still counted
 // and skipped as a null book - slots are dense, so a removal leaves a hole and
 // stopping early would drop every venue above it (DESIGN.md §17.6).
-void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size_t max_depth = kDefaultMaxDepth,
+//
+// Defined in consolidated_book.cpp and explicitly instantiated there for
+// MapOrderBookArray (the std::map oracle) and FlatBookArray (production).
+//
+// KEY: a third book type is a LINK error, and that is deliberate rather than a
+// limitation. There are exactly two implementations, and one of them exists
+// only to check the other - so the set is closed by design, and closing it here
+// keeps the merge body out of this header and out of every TU that includes it.
+template <typename BookArray>
+void MergeBooks(const BookArray& books, size_t venue_count, Book& out, size_t max_depth = kDefaultMaxDepth,
                 const VenueHealthArray* health = nullptr);
 
 // ---------------------------------------------------------------------------

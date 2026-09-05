@@ -178,7 +178,7 @@ int main(int argc, char* argv[]) {
     // because a provider exists, so the wiring layer that creates the
     // providers is what tells Core about them.
     //
-    // KEY: this must run BEFORE Init(). AddInstrument creates a VenueBook for
+    // KEY: this must run BEFORE Init(). AddInstrument creates a MapOrderBook for
     // each venue active AT THAT MOMENT, so registering afterwards would leave
     // BTCUSDT with an all-null book array and every update rejected as
     // "unconfigured venue" - silently, with the process otherwise healthy.
@@ -219,7 +219,7 @@ int main(int argc, char* argv[]) {
     // live latency can be attributed rather than guessed at. Core is handed
     // the clock rather than reading one, which is what keeps md_core free of
     // I/O and of any clock at all.
-    TimingBreakdown timing_breakdown(/*report_every=*/1000, /*warmup=*/200);
+    TimingBreakdown timing_breakdown(/*report_every=*/2000, /*warmup=*/200);
     core.SetInstrumentation(&LatencyRecorder::NowMonotonicNs, [&timing_breakdown](const Core::ApplyTimings& timings) {
         timing_breakdown.Record(timings.lock_wait_ns, timings.book_apply_ns, timings.merge_ns, timings.merged_depth,
                                 timings.delta_levels);

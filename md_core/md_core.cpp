@@ -606,10 +606,10 @@ void Core::AddInstrument(InstrumentKey instrument) {
     // instrument added before any provider has connected is legal and simply
     // publishes nothing until one does - which is the same state a venue that
     // has not spoken yet is in, and the merge already skips it.
-    VenueBookArray venue_books;
+    FlatBookArray venue_books;
     for (size_t index = 0; index < active_venues_.size(); ++index) {
         if (active_venues_[index].has_value()) {
-            venue_books[index] = std::make_unique<VenueBook>(*active_venues_[index], instrument);
+            venue_books[index] = std::make_unique<FlatOrderBook>(*active_venues_[index], instrument);
         }
     }
     venue_books_[instrument] = std::move(venue_books);
@@ -621,9 +621,9 @@ void Core::AddInstrument(InstrumentKey instrument) {
 }
 
 std::optional<VenueSlot> Core::RegisterVenue(std::string_view name) {
-    // VenueBook's constructor still takes a VenueId, so the name has to be
+    // FlatOrderBook's constructor still takes a VenueId, so the name has to be
     // converted back exactly once, here. This is the last dependency Core has
-    // on the enum; the step that migrates VenueBook to VenueSlot removes it.
+    // on the enum; the step that migrates the book to VenueSlot removes it.
     const VenueId venue = VenueConverter::ToVenueId(std::string(name));
     if (venue == VenueId::COUNT) {
         Logger::Log(LogLevel::kError, "[Core] RegisterVenue: unknown venue name '{}' - refusing", name);
@@ -649,7 +649,7 @@ std::optional<VenueSlot> Core::RegisterVenue(std::string_view name) {
     venue_id_to_slot_[static_cast<size_t>(venue)] = *slot;
     for (auto& [existing_instrument, books] : venue_books_) {
         if (!books[index]) {
-            books[index] = std::make_unique<VenueBook>(venue, existing_instrument);
+            books[index] = std::make_unique<FlatOrderBook>(venue, existing_instrument);
         }
     }
 

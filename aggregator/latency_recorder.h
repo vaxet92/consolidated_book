@@ -41,8 +41,8 @@ namespace market_data {
 // which is exactly why it lives in the aggregator and not inside Core.
 class LatencyRecorder {
    public:
-    // `report_every` samples between log lines. At ~30 updates/sec, 1000 is
-    // roughly one line every 30 seconds - often enough to watch, rare enough
+    // `report_every` samples between log lines. At ~30 updates/sec, 2000 is
+    // roughly one line every 60 seconds - often enough to watch, rare enough
     // not to become the thing being measured.
     // `warmup` samples are discarded before any are kept.
     //

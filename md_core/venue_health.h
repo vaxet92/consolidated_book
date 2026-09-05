@@ -131,7 +131,7 @@ constexpr const char* ToString(VenueHealth health) {
 }
 
 // One health verdict per venue, indexed by VenueId - the same shape as
-// VenueBookArray and VenueQuoteArray, so the three are indexed identically.
+// MapOrderBookArray and VenueQuoteArray, so the three are indexed identically.
 //
 // This is the OUTPUT of the policy, not the policy itself. Core classifies
 // each venue and hands the result to the merge; the merge does no
@@ -139,7 +139,7 @@ constexpr const char* ToString(VenueHealth health) {
 // merge is what lets the merge stay a pure function of its inputs.
 //
 // Sized by kMaxVenues (fixed CAPACITY) rather than kVenueCount (compile-time
-// venue LIST) - DESIGN.md §17.6, same step as VenueBookArray and
+// venue LIST) - DESIGN.md §17.6, same step as MapOrderBookArray and
 // VenueQuoteArray. The three must stay the same size: they are indexed
 // identically, so sizing them differently would make one of them the real
 // bound and the agreement silent.

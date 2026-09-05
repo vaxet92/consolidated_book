@@ -1,10 +1,27 @@
 #include "consolidated_book.h"
 
+#include <utility>
+
 namespace market_data {
 namespace consolidated {
 
-void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size_t max_depth,
+template <typename BookArray>
+void MergeBooks(const BookArray& books, size_t venue_count, Book& out, size_t max_depth,
                 const VenueHealthArray* health) {
+    // Deduced rather than hardcoded, so the same body serves the std::map
+    // oracle and the flat book: one yields pair<const PriceTicks, QtyUnits>,
+    // the other PriceLevel, and PriceOf/QtyOf hide the difference.
+    //
+    // KEY: FlatOrderBook::bids() returns a VIEW BY VALUE, so the expression
+    // below takes an iterator from a temporary that dies at the end of the
+    // statement. That is safe, and the reason is worth knowing: a view is a
+    // handle, not a container. The reverse_iterator it hands back wraps a
+    // vector::const_iterator pointing into the vector's own buffer, and never
+    // refers to the view object - so destroying the view cannot invalidate it.
+    using BookType = typename BookArray::value_type::element_type;
+    using BidIt = decltype(std::declval<const BookType&>().bids().begin());
+    using AskIt = decltype(std::declval<const BookType&>().asks().begin());
+
     out.Clear();  // keeps capacity - no allocation after warm-up
 
     // Every loop below runs to `venue_count`, never to kVenueCount. Bounding
@@ -40,10 +57,8 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
 
     // --- bids: highest price first ---
     {
-        using BidMap = OrderBookType<std::greater<PriceTicks>>;
-
-        std::array<BidMap::const_iterator, kMaxVenues> it{};
-        std::array<BidMap::const_iterator, kMaxVenues> end{};
+        std::array<BidIt, kMaxVenues> it{};
+        std::array<BidIt, kMaxVenues> end{};
         std::array<bool, kMaxVenues> active{};
         for (size_t i = 0; i < count; ++i) {
             // A venue that is not admitted is simply never made active, so
@@ -62,8 +77,8 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
             PriceTicks best = 0;
             bool found = false;
             for (size_t i = 0; i < count; ++i) {
-                if (active[i] && (!found || it[i]->first > best)) {
-                    best = it[i]->first;
+                if (active[i] && (!found || PriceOf(*it[i]) > best)) {
+                    best = PriceOf(*it[i]);
                     found = true;
                 }
             }
@@ -79,8 +94,8 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
             // the running total, and LevelQty() recovers the per-level value.
             QtyUnits level_qty = 0;
             for (size_t i = 0; i < count; ++i) {
-                if (active[i] && it[i]->first == best) {
-                    const QtyUnits qty = it[i]->second;
+                if (active[i] && PriceOf(*it[i]) == best) {
+                    const QtyUnits qty = QtyOf(*it[i]);
                     level_qty += qty;
                     // Attribution IS the loop index: `i` is the slot, and
                     // VenueQuote carries a slot rather than a VenueId, so
@@ -112,9 +127,8 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
     // The two sides are different types (different map comparators), so they
     // cannot share one function without a template. ---
     {
-        using AskMap = OrderBookType<std::less<PriceTicks>>;
-        std::array<AskMap::const_iterator, kMaxVenues> it{};
-        std::array<AskMap::const_iterator, kMaxVenues> end{};
+        std::array<AskIt, kMaxVenues> it{};
+        std::array<AskIt, kMaxVenues> end{};
         std::array<bool, kMaxVenues> active{};
         for (size_t i = 0; i < count; ++i) {
             if (books[i] && admitted[i]) {
@@ -130,8 +144,8 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
             PriceTicks best = 0;
             bool found = false;
             for (size_t i = 0; i < count; ++i) {
-                if (active[i] && (!found || it[i]->first < best)) {  // asks: lower is better
-                    best = it[i]->first;
+                if (active[i] && (!found || PriceOf(*it[i]) < best)) {  // asks: lower is better
+                    best = PriceOf(*it[i]);
                     found = true;
                 }
             }
@@ -145,8 +159,8 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
 
             QtyUnits level_qty = 0;
             for (size_t i = 0; i < count; ++i) {
-                if (active[i] && it[i]->first == best) {
-                    const QtyUnits qty = it[i]->second;
+                if (active[i] && PriceOf(*it[i]) == best) {
+                    const QtyUnits qty = QtyOf(*it[i]);
                     level_qty += qty;
                     // Attribution IS the loop index: `i` is the slot, and
                     // VenueQuote carries a slot rather than a VenueId, so
@@ -174,6 +188,13 @@ void MergeBooks(const VenueBookArray& books, size_t venue_count, Book& out, size
         }
     }
 }
+
+// The closed set of book implementations (consolidated_book.h): the std::map
+// oracle and the flat production book. Adding a line here is the deliberate,
+// visible cost of adding a third - and the reason the merge body can stay in
+// this .cpp instead of moving into the header.
+template void MergeBooks<MapOrderBookArray>(const MapOrderBookArray&, size_t, Book&, size_t, const VenueHealthArray*);
+template void MergeBooks<FlatBookArray>(const FlatBookArray&, size_t, Book&, size_t, const VenueHealthArray*);
 
 // Builds one band's result given the index of the level that crosses
 // `target_raw` (or side.size() if the book is exhausted first). Shared by the

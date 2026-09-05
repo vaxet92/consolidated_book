@@ -1,30 +1,30 @@
 
-#include "venue_book.h"
+#include "map_order_book.h"
 #include "logger/logger.h"
 
 namespace market_data {
 
-VenueBook::VenueBook(VenueId venue, InstrumentKey instrument) : venue_(venue), instrument_(instrument) {}
+MapOrderBook::MapOrderBook(VenueId venue, InstrumentKey instrument) : venue_(venue), instrument_(instrument) {}
 
-std::optional<std::pair<PriceTicks, QtyUnits>> VenueBook::BestBid() const {
+std::optional<std::pair<PriceTicks, QtyUnits>> MapOrderBook::BestBid() const {
     return bids_.empty() ? std::nullopt
                          : std::make_optional(std::make_pair(bids_.begin()->first, bids_.begin()->second));
 }
-std::optional<std::pair<PriceTicks, QtyUnits>> VenueBook::BestAsk() const {
+std::optional<std::pair<PriceTicks, QtyUnits>> MapOrderBook::BestAsk() const {
     return asks_.empty() ? std::nullopt
                          : std::make_optional(std::make_pair(asks_.begin()->first, asks_.begin()->second));
 }
 
-VenueId VenueBook::venue() const {
+VenueId MapOrderBook::venue() const {
     return venue_;
 }
-InstrumentKey VenueBook::instrument() const {
+InstrumentKey MapOrderBook::instrument() const {
     return instrument_;
 }
-uint64_t VenueBook::last_seq() const {
+uint64_t MapOrderBook::last_seq() const {
     return last_seq_;
 }
-int64_t VenueBook::last_update_mono_ns() const {
+int64_t MapOrderBook::last_update_mono_ns() const {
     return last_update_mono_ns_;
 }
 
@@ -43,7 +43,7 @@ int64_t VenueBook::last_update_mono_ns() const {
 // correctness-dependent on sorted input and silently drops updates when the
 // assumption breaks.
 template <typename Compare>
-void VenueBook::ApplySide(OrderBookType<Compare>& side, const std::vector<PriceLevel>& levels) {
+void MapOrderBook::ApplySide(OrderBookType<Compare>& side, const std::vector<PriceLevel>& levels) {
     auto hint = side.begin();
 
     for (const auto& level : levels) {
@@ -80,7 +80,7 @@ void VenueBook::ApplySide(OrderBookType<Compare>& side, const std::vector<PriceL
     }
 }
 
-void VenueBook::ApplyUpdate(const BookUpdate& update) {
+void MapOrderBook::ApplyUpdate(const BookUpdate& update) {
     // Recorded here rather than in Core's dispatch: ApplyUpdate is only
     // reached by a real, sequence-validated depth message. Pings, pongs and
     // subscribe acks never get this far, so the "a heartbeat must not feed
@@ -100,7 +100,7 @@ void PrintHelper::Level(const char* side, const PriceLevel& level) {
     Logger::Log(LogLevel::kInfo, "  {} {} @ {}", side, level.qty, level.price);
 }
 
-void PrintHelper::BBO(const VenueBook& book) {
+void PrintHelper::BBO(const MapOrderBook& book) {
     Logger::Log(LogLevel::kInfo, "[{} {}] seq={}", VenueConverter::ToVenueString(book.venue()),
                 VenueConverter::ToInstrumentString(book.instrument()), book.last_seq());
     if (auto bid = book.BestBid()) {
@@ -111,7 +111,7 @@ void PrintHelper::BBO(const VenueBook& book) {
     }
 }
 
-void PrintHelper::Book(const VenueBook& book) {
+void PrintHelper::Book(const MapOrderBook& book) {
     Logger::Log(LogLevel::kInfo, "[{} {}] seq={}", VenueConverter::ToVenueString(book.venue()),
                 VenueConverter::ToInstrumentString(book.instrument()), book.last_seq());
     for (const auto& [price, qty] : book.asks()) {

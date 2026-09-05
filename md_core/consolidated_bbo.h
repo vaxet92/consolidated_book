@@ -2,8 +2,9 @@
 
 #include <vector>
 
+#include "flat_order_book.h"
 #include "types.h"
-#include "venue_book.h"
+#include "map_order_book.h"
 #include "venue_health.h"
 
 namespace market_data {
@@ -52,7 +53,16 @@ struct BBO {
 // C++ lets a function and a struct share a name, but the function then
 // hides the struct name for lookup inside its own body, which breaks
 // `BBO result;` in the implementation.
-BBO ComputeBBO(const VenueBookArray& books);
+//
+// Templated on the book array for the same reason as MergeBooks, but with a
+// much smaller blast radius: this function only ever calls BestBid()/BestAsk(),
+// which both implementations expose identically, so its BODY is unchanged.
+//
+// Explicitly instantiated in consolidated_bbo.cpp for MapOrderBookArray (the
+// std::map oracle) and FlatBookArray (production) - the same closed set, and
+// the same deliberate link error for anything outside it.
+template <typename BookArray>
+BBO ComputeBBO(const BookArray& books);
 
 // Consolidates the fast-BBO stream quotes (DESIGN_1 §4.4 option 1). Same
 // max-bid / min-ask / tie-attribution logic as ComputeBBO, but sourced
@@ -64,7 +74,7 @@ BBO ComputeBBO(const VenueBookArray& books);
 // Full scan over all venues, O(venues). Used to build from scratch, as the
 // rescan fallback inside UpdateBBOWithQuote, and as the test oracle the
 // incremental path is checked against - the same role std::map plays for
-// VenueBook (§5.1).
+// MapOrderBook (§5.1).
 // `health` excludes venues whose verdict is not kLive, exactly as in
 // MergeBooks; nullptr admits everyone. Same reasoning for the default: a pure
 // function merges what it is handed, and admission is the caller's policy.

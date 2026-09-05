@@ -84,7 +84,7 @@ struct BookUpdate {
 
 // Top-of-book from a venue's fast-BBO stream (Binance @bookTicker, Bybit
 // orderbook.1, OKX bbo-tbt). Deliberately NOT a BookUpdate and never
-// applied to a VenueBook: the two streams are not mutually sequenced, and
+// applied to a MapOrderBook: the two streams are not mutually sequenced, and
 // splicing fast-BBO into the depth book corrupts it (DESIGN_1 §4.4).
 struct BboQuote {
     VenueId venue;
@@ -106,13 +106,13 @@ struct BboQuote {
 // One latest fast-BBO quote per venue, indexed by VenueId. A quote with
 // price = 0 means that venue hasn't sent one yet. Raw per-venue input to
 // consolidation, not consolidated output - which is why it lives here at
-// market_data scope, mirroring VenueBookArray, rather than in the
+// market_data scope, mirroring MapOrderBookArray, rather than in the
 // `consolidated` namespace.
 //
 // Sized by kMaxVenues (fixed CAPACITY) rather than kVenueCount (compile-time
-// venue LIST) - DESIGN.md §17.6, same reason and same step as VenueBookArray.
+// venue LIST) - DESIGN.md §17.6, same reason and same step as MapOrderBookArray.
 //
-// KEY: unlike VenueBookArray this holds values, not pointers, so there is no
+// KEY: unlike MapOrderBookArray this holds values, not pointers, so there is no
 // null to check. Safety comes from the sentinel that already exists: an unused
 // slot is a default-constructed BboQuote with price = 0, which every reader
 // already treats as "this venue hasn't sent one yet". The new slots are in a
@@ -128,14 +128,14 @@ struct BboQuote {
 //
 // Space: BboQuote is ~72 bytes, so 5 unused slots is ~360 bytes per instrument
 // - roughly 3.6 KB at 10 instruments. An order of magnitude more than
-// VenueBookArray's pointers, still small enough not to trade correctness for.
+// MapOrderBookArray's pointers, still small enough not to trade correctness for.
 using VenueQuoteArray = std::array<BboQuote, kMaxVenues>;
 
 // Core's own config, typed (VenueId/InstrumentKey), not raw strings.
 // Whoever loads the config file (main.cpp) translates strings to enums
 // once, at the boundary - Core never parses a string.
 struct CoreConfig {
-    std::vector<VenueId> venues;                    // which venues are enabled
+    std::vector<VenueId> venues;                     // which venues are enabled
     std::vector<InstrumentKey> default_instruments;  // subscribed at startup
 };
 

@@ -5,7 +5,8 @@
 namespace market_data {
 namespace consolidated {
 
-BBO ComputeBBO(const VenueBookArray& books) {
+template <typename BookArray>
+BBO ComputeBBO(const BookArray& books) {
     BBO result;
     auto& best_bid = result.best_bid;
     auto& best_ask = result.best_ask;
@@ -50,6 +51,11 @@ BBO ComputeBBO(const VenueBookArray& books) {
     return result;
 }
 
+// The closed set of book implementations (consolidated_bbo.h): the std::map
+// oracle and the flat production book.
+template BBO ComputeBBO<MapOrderBookArray>(const MapOrderBookArray&);
+template BBO ComputeBBO<FlatBookArray>(const FlatBookArray&);
+
 // Resets a level to a single venue WITHOUT reallocating: clear() keeps the
 // vector's capacity, so after Core reserves once at init this never
 // allocates again (DESIGN_1 §7.5 - no allocation on hot paths). Assigning a
@@ -66,8 +72,7 @@ static void SetSingleVenue(ConsolidatedPriceLevel& level, PriceTicks price, Venu
 // path share exactly one implementation - and so a rescan only recomputes
 // the side that actually collapsed, not both. Fills `out` in place rather
 // than returning by value, so the rescan path also reuses its buffer.
-static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out,
-                        const VenueHealthArray* health) {
+static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out, const VenueHealthArray* health) {
     out.price = 0;
     out.total_qty = 0;
     out.venues.clear();
@@ -96,8 +101,7 @@ static void ScanBestBid(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& o
     }
 }
 
-static void ScanBestAsk(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out,
-                        const VenueHealthArray* health) {
+static void ScanBestAsk(const VenueQuoteArray& quotes, ConsolidatedPriceLevel& out, const VenueHealthArray* health) {
     out.price = 0;
     out.total_qty = 0;
     out.venues.clear();
@@ -189,8 +193,7 @@ void UpdateBBOWithQuote(BBO& current, const BboQuote& update, VenueSlot slot, co
     // bound is kMaxVenues for the same reason: it is the size of the array
     // actually being indexed.
     const size_t venue_index = VenueSlotIndex(slot);
-    const bool admitted =
-        health == nullptr || venue_index >= kMaxVenues || IsAdmissible((*health)[venue_index]);
+    const bool admitted = health == nullptr || venue_index >= kMaxVenues || IsAdmissible((*health)[venue_index]);
     const PriceTicks bid_price = admitted ? update.bid_price : 0;
     const PriceTicks ask_price = admitted ? update.ask_price : 0;
 

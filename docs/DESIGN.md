@@ -49,7 +49,7 @@ BTCUSDT **spot** and BTCUSDT **perpetual** are different instruments with differ
   │        └────────────────┼────────────────┘                   │
   │                   ┌─────▼─────────────────┐                  │
   │                   │  Consolidator         │  single thread   │
-  │                   │  OWNS all 3 VenueBooks│  coalesced       │
+  │                   │  OWNS all 3 MapOrderBooks│  coalesced       │
   │                   │  apply → merge →      │  wakeup          │
   │                   │  derive → Snapshot    │  (no locks)      │
   │                   └─────┬─────────────────┘                  │
@@ -69,7 +69,7 @@ BTCUSDT **spot** and BTCUSDT **perpetual** are different instruments with differ
 
 **Libraries / targets**
 
-- `md_core` — domain types, `VenueBook`, consolidator, band math. No I/O, no networking. This is where the tests live.
+- `md_core` — domain types, `MapOrderBook`, consolidator, band math. No I/O, no networking. This is where the tests live.
 - `logger` — a small header-only wrapper over `fmt` (`Logger::Log(LogLevel, format_string, args...)`). Not `md_providers` or `md_core`-specific; anything can depend on it.
 - `md_providers` — `IMarketDataProvider` + Binance/OKX/Bybit/Replay implementations.
 - `md_proto` — generated protobuf/gRPC stubs.
@@ -179,9 +179,19 @@ Reads a capture file (newline-delimited raw venue frames + our receive timestamp
 
 ### 5.1 Per-venue book
 
-**Chosen: flat sorted vector per side.** Bids descending, asks ascending — implemented once, templated on comparator. Rationale over `std::map`: contiguous memory, no per-node allocation, and for the few-hundred-level working set a `memmove` on insert beats red-black tree rebalancing comfortably. Updates cluster near the top of book, where the memmove is shortest.
+**Chosen: flat sorted vector per side.** Rationale over `std::map`: contiguous memory, no per-node allocation, and for the few-hundred-level working set a `memmove` on insert beats red-black tree rebalancing comfortably. Updates cluster near the top of book, where the memmove is shortest.
 
-`std::map` is built first as the reference implementation and kept permanently as a test oracle — every property test runs both and asserts equality. It costs nothing and it's the cheapest correctness insurance available.
+> **BUILT** (`md_core/flat_order_book.h`), and the storage order is the **reverse** of what this section originally specified. It said "bids descending, asks ascending" — best price at `front()`. The shipped layout is **bids ascending, asks descending: the best price at `back()`**.
+>
+> **KEY: the sentence above is what proves the original wrong.** "Updates cluster near the top of book, where the memmove is shortest" is correct reasoning attached to the layout that makes it false. With the best bid at `front()`, a new best bid memmoves the *entire* book — ~16 KB at 1000 levels — so the most frequent event pays the most expensive move. Reversing storage puts that churn at `back()`, the only end of a vector that is cheap to grow and shrink: a new best price is a `push_back`, and removing one is a `pop_back`.
+>
+> Measured (`becnhmark_results.md`, one run, 20000 iterations): top-of-book churn **11× faster than `std::map`**, and **20× faster than the identical churn 500 levels deep** — `std::map` shows only 1.09× between the two, because a node is a node wherever it sits. **Erasing the top of book writes zero bytes.** The cost of the layout is that every reader walks backwards, which is close to free: hardware prefetchers handle descending strides too.
+>
+> The deep case is a real loss (1.67× slower than `std::map`) and is recorded rather than hidden. It stays net positive per depth update, because each one pays an apply *and* a merge.
+
+`std::map` was built first as the reference implementation and is kept permanently as a test oracle — `MapOrderBook`, still compiled, linked and tested. `MergeBooks` and `ComputeBBO` are templated on the book array and explicitly instantiated for both, so the two can be compared in one benchmark run and driven by one property test.
+
+> **This paid for itself immediately.** The oracle caught a silent aliasing bug in the first in-place `ApplySide`: it chose its walk direction from the net size change, which is wrong whenever a delta contains both an insert and an erase. The corrupted book stayed sorted and stayed the right length, with one level's data duplicated — nothing but a full-sequence comparison against an independent implementation would have found it.
 
 **Designed, not built: tick-indexed ladder.** `qty[(price − base) / tick]` with a maintained best-index and a two-level bitmap for next-non-empty-level lookup. O(1) update, O(1) BBO. Needs a price window around mid with rebasing on drift and an out-of-window fallback path. This is the correct endgame for a single instrument and is documented in the README as the next optimization, with the flat-vector benchmark as its baseline.
 
@@ -382,11 +392,13 @@ One thread per venue. Each does WSS receive → TLS decrypt → JSON parse → p
 
 ### 7.2 Ownership: one thread owns all books
 
-**Chosen: the consolidator thread owns all three `VenueBook`s.** Venue threads only parse; they never touch a book. Deltas cross into the consolidator through per-venue SPSC ring buffers (one producer, one consumer — the simplest lock-free structure there is).
+**Chosen: the consolidator thread owns all three `MapOrderBook`s.** Venue threads only parse; they never touch a book. Deltas cross into the consolidator through per-venue SPSC ring buffers (one producer, one consumer — the simplest lock-free structure there is).
 
 Consequence: **there is no lock anywhere on the book path.** No mutex, no seqlock, no atomics on book state. The book logic is single-threaded, so it is deterministic, trivially testable with fake input, and TSan-clean by construction rather than by care.
 
-> **STATUS: this describes the target design, not the current code.** The SPSC queues are **not built**. Today the provider threads call `Core::ApplyUpdate` directly through a `std::function`, and `Core::apply_mutex_` guards `venue_books_` and `venue_quotes_` against concurrent calls. That mutex is correct but costs contention this design would not have, and it is the one lock the paragraph above says does not exist. Closing this gap is §14.2 step 12; the mutex is commented as interim at its declaration.
+> **STATUS: built (2026-09-05, commit 2e4820e).** This section now describes the code. `Core` holds `std::array<ProviderQueue, kMaxVenues>` (`md_core.h`), provider threads push and return, and the consolidator thread owns every book. `apply_mutex_` is gone — there is no lock on the book path, as the paragraph above claims.
+>
+> Measured live: `lock_wait` median fell from 0.1 µs to **0.0**, and `book_publish` median from 76.1 µs (mutex) to 73.8 µs. The queue alone was *worse* — 113.3 µs — because the consolidator kept sleeping and being woken; it only beat the mutex once it spun before sleeping. Both the regression and the fix are recorded in `becnhmark_results.md`, because "removing an uncontended mutex made it slower" is the useful part.
 
 **Rejected for v1: per-venue book ownership with a seqlock for the reader.** Under that design each venue thread applies its own deltas and the consolidator reads across a seqlock. It parallelizes the delta apply — but the apply is the *cheapest* step, and parsing was already parallel in both designs:
 
@@ -409,9 +421,9 @@ Consequence: **there is no lock anywhere on the book path.** No mutex, no seqloc
 >
 > **The finding that matters:** *tree traversal alone* (`++it` across the three maps, no merge logic, no tie handling, no prefix sums) costs **as much as the entire merge**. So essentially 100% of `MergeBooks` is the cost of walking `std::map`; the merge's own arithmetic is in the noise. Merge cost is linear in output depth at ~4.3 ns per level.
 >
-> **And the decision that follows:** at the observed rate — a live probe measured Binance depth at ~9 messages/sec, so roughly 30 merges/sec across three venues — the merge consumes **0.026% of one core**. The flat-vector book would make it several times faster and it would not matter. Not built, deliberately (§14.2 step 16).
+> **And the decision that followed, then changed:** at the observed rate — a live probe measured Binance depth at ~9 messages/sec, so roughly 30 merges/sec across three venues — the merge consumes **0.026% of one core**, so a faster book would not have mattered on throughput grounds. It was built anyway (§14.2 step 16), and the justification turned out to be different from the one anticipated: not merge throughput, but that the first `std::map`-shaped apply scales with **book size** on a Binance book that grows without bound. See §5.1.
 >
-> The ~200 ns queue hop below remains **unmeasured**; the SPSC queues do not exist yet.
+> The ~200 ns queue hop below is still **unmeasured** in isolation. The queues exist and the end-to-end effect is measured (`becnhmark_results.md`), but the per-hop cost was never separated out.
 - The public throttled channels deliver about **60 updates/sec** combined.
 - End-to-end latency is dominated by Binance's own 100ms grouping — five orders of magnitude larger than the ~200ns queue hop this would remove.
 
@@ -551,9 +563,9 @@ Test coverage is an explicit assessment criterion, and `md_core`'s I/O-free desi
 | Staleness | Synthetic replay with injected per-venue delays; assert admission/exclusion and hysteresis behave as specified |
 | Concurrency | Seqlock under TSan: writer + readers, assert no torn reads and bounded retry |
 | Integration | Aggregator + 3 replay providers + 3 clients in-process; assert client stdout matches expected golden output |
-| Benchmark | Binance JSON parser latency (`benchmarks/bench_binance_parser.cpp`, `-DBUILD_BENCHMARKS=ON`) — **built**. Book apply throughput, merge+derive per tick, end-to-end tick→client latency — planned, not built. |
+| Benchmark | Binance JSON parser latency (`benchmarks/bench_binance_parser.cpp`) — **built**. Book apply, k-way merge, traversal-only, BBO and bytes-moved-per-diff (`benchmarks/bench_md_core.cpp`) — **built**, and it runs `MapOrderBook` and `FlatOrderBook` as two arms of the *same* process so the comparison carries no cross-run drift. End-to-end tick→client latency is measured live only (`LatencyRecorder("book_publish")` in `aggregator/main.cpp`), not by a benchmark. |
 
-Sanitizer builds (ASan/UBSan/TSan) in CI. The one benchmark that exists (parser latency) backs the parser-reuse numbers in the README; every other optimization claim is still an estimate.
+Sanitizer builds (ASan/UBSan/TSan) in CI. Optimization claims are backed by `becnhmark_results.md` or labelled as estimates; the file records the rejected attempts too, including one that made the merge 40% slower.
 
 ---
 
@@ -667,11 +679,9 @@ Remaining:
 
 **10. Finish the staleness verdict.** Provider `steady_timer` + `VenueHealthEvent` → Core → `MergeBooks`. Ends the state where the policy exists but decides nothing.
 
-**11. Benchmark harness, broadened.** `bench_binance_parser` exists; `VenueBook::ApplyUpdate` and `MergeBooks` do not. The parser was the target *least* in doubt — simdjson was already fast. The open question is whether `std::map` is the bottleneck, and no optimization of it is justifiable without that number.
+**11. Benchmark harness, broadened. — DONE.** `bench_md_core` covers apply, the k-way merge, traversal alone, the BBO and bytes-moved-per-diff. It answered the open question — see step 16.
 
-This step also settles §7.2's unmeasured claims (1–3 µs delta apply, ~150k updates/sec saturation, ~200ns queue hop). None of them are currently measured by anything in the repo.
-
-**12. Per-venue SPSC queues.** Replaces `Core::apply_mutex_` and the `CallBack` seam. **This is the item that makes the code match §7.2**, which today claims "there is no lock anywhere on the book path. No mutex" while `md_core.cpp` holds a `lock_guard`. Not primarily a performance change: a single-threaded book is deterministic, testable with fake input, and TSan-clean by construction.
+**12. Per-venue SPSC queues. — DONE** (2e4820e). `Core::apply_mutex_` and the `CallBack` seam are gone; §7.2 now describes the code. The measured story is in `becnhmark_results.md`: the queue alone was *slower* than the mutex it replaced, and only won once the consolidator spun before sleeping.
 
 **13. YAML server config.** Venue url/port/endpoint/market type/staleness thresholds in one file, replacing the compile-time constants in `types/venue.h` — including `kByBitPath = "/v5/public/spot"`, where the market type is currently baked into a path string.
 
@@ -679,20 +689,32 @@ This step also settles §7.2's unmeasured claims (1–3 µs delta apply, ~150k u
 
 **15. Synchronization review.** What remains after step 12. `aggregator_service::sessions_mutex_` is per-publish and low-contention — measure before touching. `conflated_channel`'s `condition_variable` **stays**: its job is to let the gRPC writer thread sleep when idle, and replacing it with a lock-free spin would burn a core per client to avoid an uncontended lock.
 
-**16. Flat-vector book.** Only if step 11 shows `std::map` is the bottleneck. The `std::map` implementation is kept permanently as the test oracle either way.
+**16. Flat-vector book. — BUILT** (`FlatOrderBook`), and the gate this step set for itself was met: step 11 ran and showed `std::map` is the bottleneck. `MapOrderBook` is kept permanently as the test oracle, as promised.
 
-Expected to help the **merge** at least as much as the per-venue apply, and that is the part worth measuring first. `MergeBooks` iterates three `std::map`s for ~1450 output levels, so roughly 4400 `++it` steps per merge — each one a red-black-tree traversal to a node that is almost certainly not in cache. Over three sorted vectors the same k-way merge is a linear scan with hardware prefetching working for it. Hypothesis, not a measurement.
+The hypothesis this step wrote down was:
 
-**16b. Incremental merge — evaluate only after 16, and only with numbers.**
+> Expected to help the **merge** at least as much as the per-venue apply … `MergeBooks` iterates three `std::map`s for ~1450 output levels, so roughly 4400 `++it` steps per merge — each one a red-black-tree traversal to a node that is almost certainly not in cache. Over three sorted vectors the same k-way merge is a linear scan with hardware prefetching working for it. Hypothesis, not a measurement.
 
-Rather than rebuilding the consolidated book on every update, apply the delta to the previous one, the way `UpdateBBOWithQuote` does for the BBO. Four reasons this is harder than it looks, and why it is sequenced last:
+**The hypothesis was half right, and the wrong half is the useful one.** Traversal did collapse — `iterate_only` 9833 ns → 584 ns, **16.8×**. But the merge improved only **16%**, which falsifies the premise that the merge *is* traversal. It is **write-bound**: `MergedLevel` is 176 bytes and a full merge writes ~2000 of them, ~352 KB of output against ~77 KB of input read. Removing the input cost could never have removed the merge.
+
+> **KEY:** the earlier reading — `merge_full` ≈ `iterate_only`, therefore the merge is ~100% traversal — was an inference from two costs happening to be equal, and equal is not the same as causal. Only building the alternative separated them.
+
+Where the win actually landed: **apply**, once the delta application was made in-place (see §5.1). Quantity-only diffs move **0 bytes** and cost O(delta); top-of-book churn is 11× faster than `std::map`.
+
+**16b. Incremental merge — still NOT justified**, and now for a sharper reason than before. Its condition was "step 11 shows the merge is a real bottleneck AND step 16 does not remove it". Step 16 did *not* remove it — but the remaining cost is writing `MergedLevel`, and incremental merging does not avoid that: patching prefix sums from a top-of-book change still touches every level below it. The cheaper attack is **shrinking `MergedLevel`** (128 of its 176 bytes are a `venues[8]` array with three entries used), which keeps the merge stateless and preserves free staleness exclusion. Note that the "out-of-line attribution REJECTED" result in `becnhmark_results.md` was measured when traversal cost 9833 ns and dominated; at 584 ns those conditions no longer hold and it should be re-run.
+
+The four structural objections below stand unchanged, and one of them has been sharpened by the measurement. Rather than rebuilding the consolidated book on every update, incremental merging applies the delta to the previous one, the way `UpdateBBOWithQuote` does for the BBO. Why that is harder than it looks:
 
 1. **Prefix sums dominate.** `MergedLevel` carries `cum_qty` and `cum_notional`. A change at level *i* invalidates every prefix sum from *i* to the end — and the common case is a change at the *top*, which invalidates all of them. Incremental merging avoids the k-way selection but not the accumulation pass. Keeping the sums in a Fenwick tree would make updates O(log n), at the cost of turning every band walk's O(1) reads into O(log n) queries.
 2. **Insert and erase.** A new price is an O(n) memmove into a sorted vector, and levels enter and leave the `max_depth` window as venue depth changes.
 3. **It forfeits the staleness property.** Today, excluding a stale venue is free because the merge is stateless — change the admission rule and the next output is correct. Incrementally, a venue going stale requires unwinding its contribution to ~1450 levels, which is the BBO's invalidation problem (§6.6) scaled up, and whose only sane implementation is a full rebuild. The optimization would reintroduce the exact complexity the eager merge avoids.
 4. **If 16 succeeds, this may be unnecessary.** A flat-vector merge could be fast enough that the remaining win does not justify the loss in (3).
 
-**Condition to build it:** step 11 shows the merge is a real bottleneck AND step 16 does not remove it.
+**Where the measurement left this.** Objection 4 did not save us — step 16 removed only 16% of the merge. But objection 1 got *sharper*: now that the merge is known to be write-bound, patching prefix sums is not a side cost, it **is** the cost. A top-of-book change rewrites `cum_qty` and `cum_notional` on every level below it, so incremental merging replaces a 176-byte-per-level rebuild with a 24-byte-per-level patch — a ~7× reduction in the dominant term, but still O(n), and still paying objection 3 in full.
+
+Shrinking `MergedLevel` gets at the same 352 KB without giving up the stateless merge, so it is the cheaper attack and should be tried first. Both are honestly open; neither is built.
+
+**Condition to build it, updated:** shrinking `MergedLevel` fails to make the merge cheap enough, AND a live measurement (not this hot-cache benchmark) shows the merge still dominates publish latency.
 
 **17. README + hardening.** Signal handling (the process currently dies only on an external kill, skipping `Stop()`), per-session reconnect, benchmark results, known limitations.
 
@@ -803,7 +825,7 @@ Three production requirements sit outside what that argument weighed:
 | Add or drop an instrument | restart — same blast radius |
 | Put a provider near its exchange (§16.4) | impossible; one process is on one host |
 
-The blast radius is the real problem, more than the restart itself. One process holds all venues, all instruments, all clients, and one global `apply_mutex_`. A change to any part of it stops all of it.
+The blast radius is the real problem, more than the restart itself. One process holds all venues, all instruments and all clients for its market. A change to any part of it stops all of it.
 
 **The trade being made:** a serialization hop on every update (§17.10 sizes it) in exchange for the ability to add, remove and relocate any part of the system without stopping the rest. At one symbol that trade is bad — which is why §7.3b rejected it and why it is kept. At twenty symbols and three venues running continuously, it is the only thing that answers the question.
 
@@ -1002,7 +1024,7 @@ Today `VenueId` is an enum and `kVenueCount` sizes every array, so adding a venu
 Storage is sized at compile time, populated at runtime:
 
 ```cpp
-std::array<VenueBook, kMaxVenues> books_;   // fixed capacity, no allocation
+std::array<MapOrderBook, kMaxVenues> books_;   // fixed capacity, no allocation
 uint8_t active_count_ = 0;                  // loops run to this, not to kVenueCount
 ```
 
@@ -1021,7 +1043,7 @@ Unlike the rest of §17, part of this subsection **is built**. What follows is t
 **Done:**
 
 - `VenueRegistry` (`types/venue_registry.h`) assigns dense `VenueSlot`s by venue name, with a release/acquire publication so one writer can register while readers run.
-- `VenueBookArray`, `VenueQuoteArray` and `VenueHealthArray` are sized `kMaxVenues`, not `kVenueCount`.
+- `MapOrderBookArray`, `VenueQuoteArray` and `VenueHealthArray` are sized `kMaxVenues`, not `kVenueCount`.
 - `Core::RegisterVenue` / `Core::RemoveVenue` exist. `Init` registers nothing: venues appear when a provider appears (§17.4). `main.cpp` calls `RegisterVenue` as it constructs each provider — the in-process stand-in for `kHello`.
 - `RemoveVenue` deactivates without releasing the slot, frees that venue's book for every instrument, clears its stored quote and forces a BBO rescan.
 - **Slot and `VenueId` are now independent.** `Core` holds a `venue_id_to_slot_` translation table and converts once at each of its three entry points. Registering OKX first gives it slot 0 and everything still resolves.
@@ -1041,7 +1063,7 @@ enum Venue { VENUE_UNSPECIFIED = 0; BINANCE = 1; BYBIT = 2; OKX = 3; }
 ```
 
 1. **The proto has its own venue enum.** A fourth venue flows correctly through registration, storage, the merge and the BBO, reaches `MakeVenueWireTable` — and resolves to `VENUE_UNSPECIFIED`, because the contract has no value for it. Adding one means regenerating and redeploying every client.
-2. **`Core::RegisterVenue` refuses unknown names**, because `VenueBook`'s constructor still takes a `VenueId` and the name has to be converted back once. This is the last dependency md_core has on the enum, kept in one visible place.
+2. **`Core::RegisterVenue` refuses unknown names**, because `MapOrderBook`'s constructor still takes a `VenueId` and the name has to be converted back once. This is the last dependency md_core has on the enum, kept in one visible place.
 
 > **KEY:** md_core is done; **the wire is not.** The recompile has moved from the merge to the contract. That is a smaller and better-understood problem — but claiming "venues can be added at runtime" would be false, and the difference is exactly the kind of thing a debrief question finds.
 
@@ -1168,7 +1190,7 @@ md_core merges eagerly on every depth update, so `merges/s = instruments × dept
 
 **Conclusion: one consolidator thread is enough at ten instruments. Do not shard.** §16.1's shard key stays the plan for when it is needed; the number says it is not needed yet.
 
-**The caveat, from the benchmark file's own note:** that loop keeps the tree nodes hot in cache, and in production there are milliseconds between merges. `VenueBook` is a `std::map`, so one instrument holds roughly `1000 levels × 2 sides × 3 venues × ~50 B ≈ 300 KB` of pointer-chasing nodes — **estimate, not measured**. Ten instruments is ~3 MB, past L2, with each instrument evicting the others between merges. The per-merge cost at ten instruments will therefore be **worse** than 8.5 µs. Even at 5× it is ~10% of a core and the conclusion holds, but the direction is unfavourable and it should be **measured at ten instruments rather than extrapolated.**
+**The caveat, from the benchmark file's own note:** that loop keeps the tree nodes hot in cache, and in production there are milliseconds between merges. `MapOrderBook` is a `std::map`, so one instrument holds roughly `1000 levels × 2 sides × 3 venues × ~50 B ≈ 300 KB` of pointer-chasing nodes — **estimate, not measured**. Ten instruments is ~3 MB, past L2, with each instrument evicting the others between merges. The per-merge cost at ten instruments will therefore be **worse** than 8.5 µs. Even at 5× it is ~10% of a core and the conclusion holds, but the direction is unfavourable and it should be **measured at ten instruments rather than extrapolated.**
 
 **Parsing is not the limit.** A 1000-level snapshot parses in ~140 µs (**reported by measurement but not yet recorded in `becnhmark_results.md` — record it, with the message size**). Deep messages arrive at ~10/s, so `140 µs × 10/s ≈ 0.14%` of a core per instrument. Ten instruments on one parse thread would be ~1.4%.
 
