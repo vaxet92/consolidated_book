@@ -3,6 +3,7 @@ find_package(simdjson CONFIG REQUIRED)
 
 add_library(config STATIC
     config.cpp
+    venues_config.cpp
 )
 
 target_include_directories(config PUBLIC

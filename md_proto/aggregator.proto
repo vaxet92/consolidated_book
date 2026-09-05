@@ -13,6 +13,21 @@ enum Venue {
   OKX = 3;
 }
 
+// Spot and futures are DIFFERENT MARKETS that happen to share a symbol name.
+// A subscription names exactly one of them: (symbol, market) is the
+// subscription key, the wire form of the domain's InstrumentKey.
+//
+// KEY: MARKET_UNSPECIFIED is not a default, it is an ERROR. A proto3 enum
+// field has no presence, so "the client forgot this field" and "the client
+// chose value 0" are the SAME BYTES on the wire. If 0 meant SPOT, a client
+// that forgot would be silently subscribed to spot and never find out. It is
+// rejected at Subscribe instead, so the mistake is loud.
+enum MarketType {
+  MARKET_UNSPECIFIED = 0;
+  SPOT = 1;
+  FUTURES = 2;
+}
+
 // PROTOCOL CONSTANT: every scaled value in this file - in both directions -
 // uses a fixed scale of 1e8. A price of 78310.10 is 7831010000000; a notional
 // of 1,000,000 USDT is 100000000000000.
@@ -48,6 +63,10 @@ message SubscribeRequest {
   bool bbo = 2;                                   // subscribe to BBO
   optional VolumeBandsRequest volume_bands = 3;   // PRESENT = subscribed
   optional PriceBandsRequest price_bands = 4;     // PRESENT = subscribed
+
+  // REQUIRED. Together with `symbol` this selects the book. UNSPECIFIED is
+  // rejected with INVALID_ARGUMENT - see the enum for why it cannot default.
+  MarketType market = 5;
 }
 
 // All prices/quantities/notionals are unsigned across the wire, matching
@@ -132,6 +151,13 @@ message Update {
   repeated VenueStatus venues = 4;
   uint32 price_scale = 5;               // exponent: divide price fields by 10^price_scale
   uint32 qty_scale = 6;                 // exponent: divide qty fields by 10^qty_scale
+
+  // Which market this update is FOR. Constant for the life of a stream, but
+  // sent per message for the same reason `symbol` is: a captured message has
+  // to be self-describing, and "BTCUSDT" alone cannot tell a spot book from a
+  // futures one.
+  MarketType market = 7;
+
   oneof payload {
     Bbo bbo = 10;
     VolumeBands volume_bands = 11;

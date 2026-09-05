@@ -35,11 +35,39 @@ ContinuityAction CheckBybitContinuity(const BookUpdate& update, uint64_t& last_u
 // Updates last_seq on kReset/kApply.
 ContinuityAction CheckOkxContinuity(const BookUpdate& update, uint64_t& last_seq);
 
-// Binance depthUpdate, once live - U == last_u + 1.
+// Binance SPOT depthUpdate, once live - U == last_u + 1.
 // Binance never sends a snapshot on the stream, so kReset/kIgnore never
 // occur here; the book is seeded from REST instead (see below).
 // Updates last_u on kApply.
-ContinuityAction CheckBinanceContinuity(const BookUpdate& update, uint64_t& last_u);
+//
+// FUTURES does NOT use this rule - see CheckBinanceFuturesContinuity below.
+ContinuityAction CheckBinanceSpotContinuity(const BookUpdate& update, uint64_t& last_u);
+
+// Binance FUTURES depthUpdate, once live.
+//
+// KEY: futures U/u come from a counter Binance shares across EVERY symbol on
+// futures, not just this one - measured live, 2026-09-05: consecutive
+// BTCUSDT messages showed U 68 to 323 higher than last_u + 1, on almost every
+// message, with nothing actually missing. CheckBinanceSpotContinuity's rule
+// (U <= last_u + 1) reads every one of those as a gap - live, that was 14
+// resyncs in 14 seconds. U is real, but it answers a question about the
+// WHOLE EXCHANGE, not about this symbol, so it cannot be the continuity
+// signal here.
+//
+// `chain_seq` is `pu`: Binance's own answer to "what did you last send me for
+// THIS symbol", independent of every other symbol's traffic. The rule is
+// simply chain_seq == last_u - no straddle relaxation like spot needs, because
+// pu names an exact prior message rather than a coverage range, so there is
+// no overlap case to allow for.
+//
+// Takes raw ids, not a BookUpdate: unlike the other three Check*Continuity
+// functions, this rule does not touch prev_seq/is_snapshot at all, and pu is
+// deliberately not a BookUpdate field (see BinanceParser::LastChainSeq) - so
+// there is nothing on BookUpdate for a third parameter to add.
+//
+// Updates last_u on kApply, to event_seq (this message's own `u`) - same
+// meaning as every other Check*Continuity function's last_seq parameter.
+ContinuityAction CheckBinanceFuturesContinuity(uint64_t chain_seq, uint64_t event_seq, uint64_t& last_u);
 
 // Binance snapshot reconciliation (§4.2). Given the REST snapshot's
 // lastUpdateId and the events buffered while it was in flight, returns the

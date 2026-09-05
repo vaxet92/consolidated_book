@@ -84,3 +84,34 @@ TEST(WireTranslationTest, BboCarriesCrossedFlagAndBothSides) {
     EXPECT_EQ(wire_bbo.best_ask().price(), 99LL);
     EXPECT_TRUE(wire_bbo.crossed());
 }
+
+// --------------------------------------------------------------- market ---
+//
+// Spot and futures are separate subscriptions, so the market is half of the
+// key that selects a book. These tests pin the ASYMMETRY between the two
+// directions: domain -> wire always succeeds, wire -> domain can refuse.
+
+TEST(WireTranslationTest, MarketRoundTripsInBothDirections) {
+    EXPECT_EQ(ToWire(MarketType::kSpot), wire::SPOT);
+    EXPECT_EQ(ToWire(MarketType::kFutures), wire::FUTURES);
+
+    EXPECT_EQ(FromWire(wire::SPOT), MarketType::kSpot);
+    EXPECT_EQ(FromWire(wire::FUTURES), MarketType::kFutures);
+}
+
+// The contract test for the whole design decision. A proto3 enum field has no
+// presence, so a client that never set `market` sends MARKET_UNSPECIFIED -
+// byte-for-byte identical to a client that deliberately sent zero. If this
+// ever returned kSpot, that client would be silently subscribed to the spot
+// book and would have no way to discover it.
+TEST(WireTranslationTest, UnspecifiedMarketIsRejectedNotDefaultedToSpot) {
+    EXPECT_EQ(FromWire(wire::MARKET_UNSPECIFIED), std::nullopt);
+}
+
+// proto3 enums are OPEN: a value outside the generated enumerators is legal on
+// the wire and arrives intact, which is how a NEWER client talking to an OLDER
+// server shows up. It names no book this build holds, so it is refused exactly
+// like UNSPECIFIED rather than being coerced into one of the known values.
+TEST(WireTranslationTest, UnknownMarketValueFromANewerClientIsRejected) {
+    EXPECT_EQ(FromWire(static_cast<wire::MarketType>(99)), std::nullopt);
+}

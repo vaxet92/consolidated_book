@@ -260,23 +260,19 @@ bool ServerConfig::Validate() const {
         std::cerr << "Error: at least one instrument required\n";
         return false;
     }
-    for (const auto& entry : instruments) {
-        for (const MarketType market : entry.markets) {
-            // The schema accepts "futures" - parsing does not reject it, so a
-            // config can be WRITTEN ahead of the feature - but nothing in this
-            // project subscribes to a futures stream yet (main.cpp builds spot
-            // providers only). Accepting it silently here would let Core
-            // allocate a book that never receives an update and a client
-            // subscribe to a symbol that never ticks - a worse failure than
-            // refusing to start.
-            if (market == MarketType::kFutures) {
-                std::cerr << "Error: instrument \"" << entry.symbol
-                          << "\" requests futures, which is not implemented yet (parsed, not yet wired to a "
-                             "provider)\n";
-                return false;
-            }
-        }
-    }
+    // Futures used to be rejected here - the schema parsed "futures" but no
+    // provider subscribed to one, so accepting it would have left Core holding
+    // a book that never ticked. That guard is gone because the streams now
+    // exist and were verified against the live venues:
+    //   Binance  fstream/fapi, pu-based continuity  - 2340 msgs, 0 resyncs
+    //   Bybit    /v5/public/linear                  - 733 msgs, 0 rule violations
+    //   OKX      BTC-USDT-SWAP + ctVal conversion   - 173 msgs, 0 rule violations
+    //
+    // Nothing venue-specific is checked here on purpose. Whether a given
+    // (venue, market) is actually reachable is a question about ENDPOINTS, and
+    // this file knows nothing about venues_config.json - main.cpp answers it,
+    // before building any provider, by requiring every enabled venue to have
+    // endpoints for the market being run.
     if (depth == 0) {
         std::cerr << "Error: --depth must be greater than zero\n";
         return false;

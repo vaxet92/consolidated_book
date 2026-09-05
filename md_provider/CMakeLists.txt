@@ -8,10 +8,10 @@ add_library(md_provider STATIC
     md_provider.cpp
     continuity.cpp
     seq_dedup.cpp
+    rest.cpp
     ws/ws.cpp
     binance/binance_provider.cpp
     binance/binance_parser.cpp
-    binance/binance_rest.cpp
     bybit/bybit_provider.cpp
     bybit/bybit_parser.cpp
     okx/okx_provider.cpp
@@ -31,4 +31,13 @@ target_link_libraries(md_provider PUBLIC
     OpenSSL::SSL
     OpenSSL::Crypto
     simdjson::simdjson
+)
+
+# PRIVATE: only the provider .cpp files call ResolvePath. ProviderConfig is
+# plain strings with no venues_config type in its signature, so nothing that
+# links md_provider needs config's headers on its own include path.
+#
+# No cycle: config depends only on types, never on md_provider.
+target_link_libraries(md_provider PRIVATE
+    config
 )

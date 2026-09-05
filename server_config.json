@@ -9,7 +9,8 @@
         {
             "symbol": "BTCUSDT",
             "market": [
-                "spot"
+                "spot",
+                "futures"
             ]
         }
     ]

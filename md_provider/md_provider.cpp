@@ -1,4 +1,5 @@
 #include "md_provider.h"
+#include "config/venues_config.h"
 #include "logger/logger.h"
 #include <root_certificates.hpp>
 
@@ -6,6 +7,7 @@ using namespace market_data;
 
 Provider::Provider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
     : config(config),
+      venue_market_str_(VenueConverter::ToVenueMarketString(config.venue_id, config.instrument)),
       running(false),
       ssl_ctx(ssl::context::tlsv12_client),
       health_timer_(ioc),
@@ -17,6 +19,11 @@ Provider::Provider(const ProviderConfig& config, CallBack callback, QuoteCallBac
     ssl_ctx.set_verify_mode(ssl::verify_peer);
 }
 
+void Provider::ResolveStreamPaths(std::string_view venue_symbol) {
+    depth_path_ = ResolvePath(config.depth_path, venue_symbol);
+    bbo_path_ = ResolvePath(config.bbo_path, venue_symbol);
+}
+
 Provider::~Provider() {
     Stop();
 }
@@ -26,7 +33,7 @@ void Provider::Start() {
         return;  // Already running
     }
 
-    Logger::Log(LogLevel::kInfo, "[{}] Starting provider...", VenueConverter::ToVenueString(config.venue_id));
+    Logger::Log(LogLevel::kInfo, "[{}] Starting provider...", venue_market_str_);
 
     worker_thread = std::thread([this]() { this->Run(); });
 }
@@ -36,7 +43,7 @@ void Provider::Stop() {
         return;  // Already stopped
     }
 
-    Logger::Log(LogLevel::kInfo, "[{}] Stopping provider...", VenueConverter::ToVenueString(config.venue_id));
+    Logger::Log(LogLevel::kInfo, "[{}] Stopping provider...", venue_market_str_);
 
     // Stop() marks each session as deliberately closed, which also silences
     // its on-closed callback - otherwise every socket would ask to be
@@ -58,9 +65,17 @@ void Provider::Stop() {
 void Provider::Run() {
     while (running) {
         try {
-            // Let the subclass drop per-connection state before the new
-            // sessions start delivering messages.
-            OnReconnect();
+            // Let the subclass drop per-connection state, and do any blocking
+            // setup a connection depends on, before the new sessions start
+            // delivering messages. A false return means that setup failed -
+            // treat it exactly like a dropped connection so it backs off and
+            // retries rather than connecting with state it knows is wrong.
+            if (!OnReconnect()) {
+                if (running) {
+                    HandleReconnection();
+                }
+                continue;
+            }
 
             // Reset io_context for a new run
             ioc.restart();
@@ -81,8 +96,8 @@ void Provider::Run() {
             // of 1 this is exactly the previous single-session behaviour.
             const uint32_t connections = std::max<uint32_t>(1, config.connections);
 
-            Logger::Log(LogLevel::kInfo, "[{}] Connecting to {} ({} connection(s) per stream)...",
-                        VenueConverter::ToVenueString(config.venue_id), GetHost(), connections);
+            Logger::Log(LogLevel::kInfo, "[{}] Connecting to {} ({} connection(s) per stream)...", venue_market_str_,
+                        GetHost(), connections);
 
             depth_sessions_.resize(connections);
             bbo_sessions_.resize(connections);
@@ -110,8 +125,7 @@ void Provider::Run() {
                     // Deliberate resync after a depth gap - NOT a connection
                     // failure, so it must not consume the reconnect-attempt
                     // budget that permanently stops the provider.
-                    Logger::Log(LogLevel::kInfo, "[{}] Resyncing after depth gap",
-                                VenueConverter::ToVenueString(config.venue_id));
+                    Logger::Log(LogLevel::kInfo, "[{}] Resyncing after depth gap", venue_market_str_);
                     std::this_thread::sleep_for(std::chrono::milliseconds(RESYNC_DELAY_MS));
                 } else {
                     // Connection dropped, attempt reconnection
@@ -120,7 +134,7 @@ void Provider::Run() {
             }
 
         } catch (const std::exception& e) {
-            Logger::Log(LogLevel::kError, "[{}] Error: {}", VenueConverter::ToVenueString(config.venue_id), e.what());
+            Logger::Log(LogLevel::kError, "[{}] Error: {}", venue_market_str_, e.what());
 
             if (running) {
                 HandleReconnection();
@@ -128,15 +142,14 @@ void Provider::Run() {
         }
     }
 
-    Logger::Log(LogLevel::kInfo, "[{}] Provider stopped", VenueConverter::ToVenueString(config.venue_id));
+    Logger::Log(LogLevel::kInfo, "[{}] Provider stopped", venue_market_str_);
 }
 
 void Provider::HandleReconnection() {
     if (!running) return;
 
     if (++reconnect_count > MAX_RECONNECT_ATTEMPTS) {
-        Logger::Log(LogLevel::kError, "[{}] Max reconnect attempts reached. Stopping.",
-                    VenueConverter::ToVenueString(config.venue_id));
+        Logger::Log(LogLevel::kError, "[{}] Max reconnect attempts reached. Stopping.", venue_market_str_);
         running = false;
         return;
     }
@@ -145,8 +158,8 @@ void Provider::HandleReconnection() {
     uint64_t delay_ms =
         std::min(INITIAL_RECONNECT_DELAY_MS * (uint64_t{1} << (reconnect_count - 1)), MAX_RECONNECT_DELAY_MS);
 
-    Logger::Log(LogLevel::kWarning, "[{}] Reconnecting in {}ms (attempt {})",
-                VenueConverter::ToVenueString(config.venue_id), delay_ms, reconnect_count);
+    Logger::Log(LogLevel::kWarning, "[{}] Reconnecting in {}ms (attempt {})", venue_market_str_, delay_ms,
+                reconnect_count);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
 }
@@ -181,8 +194,8 @@ void Provider::OnDepthSessionClosed(uint32_t index) {
 
     // Logged 1-based: `index` is a vector subscript and a bitmask shift, but
     // an operator reading "connection 1 of 3" should not have to know that.
-    Logger::Log(LogLevel::kWarning, "[{}] depth connection {}/{} closed, {} still live",
-                VenueConverter::ToVenueString(config.venue_id), index + 1, depth_sessions_.size(), depth_live_);
+    Logger::Log(LogLevel::kWarning, "[{}] depth connection {}/{} closed, {} still live", venue_market_str_, index + 1,
+                depth_sessions_.size(), depth_live_);
 
     // KEY: only a TOTAL outage invalidates sync state. OnReconnect() exists
     // to discard a book we can no longer trust because we do not know what we
@@ -190,8 +203,7 @@ void Provider::OnDepthSessionClosed(uint32_t index) {
     // clearing would throw away a correct book and force a needless REST
     // snapshot.
     if (depth_live_ == 0) {
-        Logger::Log(LogLevel::kError, "[{}] all depth connections down",
-                    VenueConverter::ToVenueString(config.venue_id));
+        Logger::Log(LogLevel::kError, "[{}] all depth connections down", venue_market_str_);
         OnReconnect();
     }
 }
@@ -201,8 +213,8 @@ void Provider::OnBboSessionClosed(uint32_t index) {
         --bbo_live_;
     }
 
-    Logger::Log(LogLevel::kWarning, "[{}] bbo connection {}/{} closed, {} still live",
-                VenueConverter::ToVenueString(config.venue_id), index + 1, bbo_sessions_.size(), bbo_live_);
+    Logger::Log(LogLevel::kWarning, "[{}] bbo connection {}/{} closed, {} still live", venue_market_str_, index + 1,
+                bbo_sessions_.size(), bbo_live_);
 }
 
 void Provider::ScheduleHealthCheck() {
@@ -265,7 +277,7 @@ void Provider::PublishHealth(StreamKind stream, VenueHealth health) {
 
     const char* stream_name = (stream == StreamKind::kDepth) ? "depth" : "bbo";
     Logger::Log(health == VenueHealth::kLive ? LogLevel::kInfo : LogLevel::kWarning, "[{}] {} health: {} -> {}",
-                VenueConverter::ToVenueString(config.venue_id), stream_name, ToString(previous), ToString(health));
+                venue_market_str_, stream_name, ToString(previous), ToString(health));
 
     previous = health;
 
@@ -292,7 +304,7 @@ bool Provider::AcceptDepth(uint64_t id, uint32_t conn_index, bool venue_reset) {
         // its own noise.
         if (depth_dedup_.ConsecutiveDrops() == SeqDedup::kSuspiciousDropStreak) {
             Logger::Log(LogLevel::kError, "[{}] depth dedup dropped {} in a row - missed a sequence reset?",
-                        VenueConverter::ToVenueString(config.venue_id), SeqDedup::kSuspiciousDropStreak);
+                        venue_market_str_, SeqDedup::kSuspiciousDropStreak);
         }
         return false;
     }
@@ -303,7 +315,7 @@ bool Provider::AcceptBbo(uint64_t id, uint32_t conn_index) {
     if (!bbo_dedup_.Accept(id, conn_index, /*is_reset=*/false)) {
         if (bbo_dedup_.ConsecutiveDrops() == SeqDedup::kSuspiciousDropStreak) {
             Logger::Log(LogLevel::kError, "[{}] bbo dedup dropped {} in a row - non-monotonic quote ids?",
-                        VenueConverter::ToVenueString(config.venue_id), SeqDedup::kSuspiciousDropStreak);
+                        venue_market_str_, SeqDedup::kSuspiciousDropStreak);
         }
         return false;
     }

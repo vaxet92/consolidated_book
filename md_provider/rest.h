@@ -9,6 +9,11 @@ namespace market_data {
 // std::nullopt on any failure (DNS, TLS, non-200 status, malformed
 // response). Never throws.
 //
+// Venue-agnostic. This lived in binance/ while Binance's depth snapshot was
+// the only REST call in the project; OKX now needs one too (to read a swap's
+// contract size), and a file named binance_rest.h included from okx_provider
+// would have been actively misleading about what depends on what.
+//
 // Blocking BY DESIGN, but it MUST NOT be called from a Provider's
 // io_context thread: that thread drives the WebSocket reads, and blocking
 // it for an HTTP round-trip stalls exactly the event buffering the snapshot

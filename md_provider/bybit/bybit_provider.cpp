@@ -8,7 +8,13 @@
 using namespace market_data;
 
 BybitProvider::BybitProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
-    : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {}
+    : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {
+    // Bybit's paths (/v5/public/spot, /v5/public/linear) carry no {symbol} -
+    // the symbol goes in the subscribe frame's topic instead. The call is
+    // still made, so that adding a symbol to a Bybit path later is a
+    // venues_config.json edit and nothing else.
+    ResolveStreamPaths(VenueConverter::ToInstrumentString(config.instrument.Symbol()));
+}
 
 std::string BybitProvider::DepthSubscriptionMessage() const {
     // Depth is part of the TOPIC NAME on Bybit, not a parameter - already
@@ -62,8 +68,8 @@ void BybitProvider::OnDepthMessage(const std::string& message, uint32_t conn_ind
             // The book is now WRONG, not merely stale (§4.2). Applying this
             // delta would silently corrupt it, so drop the book and
             // re-subscribe to get a fresh snapshot.
-            Logger::Log(LogLevel::kWarning, "[BYBIT] depth gap: expected u={}, got {} - resyncing", last_depth_u_ + 1,
-                        update->seq);
+            Logger::Log(LogLevel::kWarning, "[{}] depth gap: expected u={}, got {} - resyncing", venue_market_str_,
+                        last_depth_u_ + 1, update->seq);
             last_depth_u_ = 0;
             RequestResync();
             return;

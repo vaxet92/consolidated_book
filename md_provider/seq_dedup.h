@@ -19,7 +19,7 @@ namespace market_data {
 // AFTER parse, because is_reset needs the parsed message.
 //
 // KEY: BEFORE the continuity check. Continuity is a state machine keyed on the
-// last sequence number - a duplicate reaching CheckBinanceContinuity looks
+// last sequence number - a duplicate reaching CheckBinanceSpotContinuity looks
 // like U != last_u + 1, which it reports as a gap and resyncs on. Redundant
 // connections would then cause the exact outage they were added to prevent.
 //

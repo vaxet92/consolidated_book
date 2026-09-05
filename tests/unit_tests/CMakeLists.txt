@@ -20,6 +20,7 @@ add_executable(unit_tests
     src/test_provider_message.cpp
     src/test_core_queued_path.cpp
     src/test_config_json.cpp
+    src/test_aggregator_routing.cpp
 )
 
 target_link_libraries(unit_tests PRIVATE

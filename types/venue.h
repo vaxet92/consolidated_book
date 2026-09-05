@@ -124,33 +124,16 @@ inline constexpr std::array<VenueId, kVenueCount> VenueIdArray{
     VenueId::OKX,
 };
 
-// PORTS: 443 everywhere, not the 9443 (Binance) and 8443 (OKX) their docs
-// lead with. All three venues serve the same streams on standard HTTPS, and
-// many networks permit only 443 outbound - office, hotel and some ISPs.
+// ENDPOINTS (hosts, ports, WS and REST paths) are no longer here. They are
+// data now, loaded per (venue, market) from venues_config.json - see
+// config/venues_config.h, which also carries the reasoning that used to live
+// in this block: why every venue is on 443 rather than the 9443/8443 their
+// docs lead with, why OKX's 443 is only partly verified, and why Binance is
+// the only venue that needs REST at all.
 //
-// KEY: a blocked port presents as a TCP connect timeout, which is
-// indistinguishable in the logs from the venue being down. Verified here with
-// `nc -vz <host> 443` against all three.
-inline constexpr std::string_view kBinanceHost = "stream.binance.com";
-inline constexpr std::string_view kBinancePort = "443";
-// Binance's REST API is a different host/port from its WS stream. Only
-// Binance needs REST at all - its depth stream is differential-only, so the
-// book must be seeded from GET /api/v3/depth (DESIGN_1 §4.3). Bybit and OKX
-// send an in-channel snapshot instead.
-inline constexpr std::string_view kBinanceRestHost = "api.binance.com";
-inline constexpr std::string_view kBinanceRestPort = "443";
-
-inline constexpr std::string_view kBybitHost = "stream.bybit.com";
-inline constexpr std::string_view kBybitPort = "443";
-static constexpr std::string_view kByBitPath = "/v5/public/spot";
-
-inline constexpr std::string_view kOkxHost = "ws.okx.com";
-// 443 rather than the documented 8443. TCP connect succeeds (ws.okx.com is
-// behind Cloudflare), but that alone does not prove OKX routes /ws/v5/public
-// there - if this ever fails it will fail at the HANDSHAKE, not at connect,
-// and reverting to 8443 is the fix.
-inline constexpr std::string_view kOkxPort = "443";
-static constexpr std::string_view kOkxPath = "/ws/v5/public";
+// KEY: they moved because a path could not depend on the market. kByBitPath
+// was the literal string "/v5/public/spot", so a Bybit FUTURES provider had no
+// way to reach /v5/public/linear without changing the type of the constant.
 
 // Staleness backstops, per venue AND per stream (DESIGN_1 §6.2c).
 //
@@ -262,5 +245,28 @@ class VenueConverter {
             return InstrumentId::SOLUSDT;
         }
         return std::nullopt;
+    }
+
+    // Venue AND market, e.g. "BINANCE:FUTURES".
+    //
+    // KEY: constexpr, returning a string_view into a string LITERAL - static
+    // storage, so returning the view is safe and nothing allocates per log call.
+    // ToVenueString above returns std::string and allocates on every call; these
+    // tags sit on paths that can fire per gap, so the cheap form is worth having.
+    static constexpr std::string_view ToVenueMarketString(VenueId venue, MarketType market) {
+        switch (venue) {
+            case VenueId::BINANCE:
+                return market == MarketType::kSpot ? "BINANCE:SPOT" : "BINANCE:FUTURES";
+            case VenueId::BYBIT:
+                return market == MarketType::kSpot ? "BYBIT:SPOT" : "BYBIT:FUTURES";
+            case VenueId::OKX:
+                return market == MarketType::kSpot ? "OKX:SPOT" : "OKX:FUTURES";
+            default:
+                return market == MarketType::kSpot ? "UNKNOWN:SPOT" : "UNKNOWN:FUTURES";
+        }
+    }
+
+    static constexpr std::string_view ToVenueMarketString(VenueId venue, InstrumentKey key) {
+        return ToVenueMarketString(venue, key.Market());
     }
 };

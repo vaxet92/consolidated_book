@@ -54,6 +54,18 @@ class AggregatorServiceImpl final : public wire::Aggregator::Service {
 
     struct Subscription {
         std::shared_ptr<Channel> channel;
+
+        // What this session subscribed to - symbol AND market. They are two
+        // separate subscriptions, so a spot subscriber must never receive a
+        // futures update.
+        //
+        // KEY: one packed uint32 compare in the publish loops filters BOTH
+        // halves at once, which is why InstrumentKey is packed. Before this
+        // field existed the fanout filtered by NOTHING: every session received
+        // every instrument, and FillHeader dropped the market from the header,
+        // so a client could not even tell which book it had been sent.
+        InstrumentKey instrument;
+
         bool wants_bbo = false;
         bool wants_volume_bands = false;
         bool wants_price_bands = false;

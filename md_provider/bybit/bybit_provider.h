@@ -21,9 +21,6 @@ class BybitProvider : public Provider {
     std::string DepthSubscriptionMessage() const override;
     std::string BboSubscriptionMessage() const override;
 
-    const char* GetDepthPath() const override { return kByBitPath.data(); }
-    const char* GetBboPath() const override { return kByBitPath.data(); }
-
    private:
     // Last applied `u` on the depth stream (orderbook.50). Bybit increments
     // it by exactly 1 per delta, so any other step is a gap. 0 means "no

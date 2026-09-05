@@ -40,6 +40,51 @@ class OkxParser : public Parser {
     // Gating on `data` (always present here) keeps the read forward-only.
     // Never throws.
     std::optional<BookUpdate> ParseBboMessage(std::string_view message, VenueId venue, InstrumentKey instrument);
+
+    // Contract size (OKX `ctVal`) for a SWAP instrument, scaled by
+    // kScaleFactor. Every parsed level's quantity is multiplied by it.
+    //
+    // KEY: OKX quotes SWAP sizes in CONTRACTS, not the base currency.
+    // BTC-USDT-SWAP has ctVal 0.01 BTC, so a raw level of "495.94" means
+    // 4.9594 BTC. Binance futures and Bybit linear both quote plain BTC, and
+    // all three merge into ONE consolidated futures book - so leaving OKX
+    // unconverted puts it in that book 100x oversized and it dominates every
+    // price level.
+    //
+    // The default is kScaleFactor (== 1.0), which leaves quantities untouched.
+    // That is correct for SPOT, where sizes are already in the base currency,
+    // and means the conversion costs spot nothing.
+    //
+    // Must be called before any message is parsed. OKXProvider does it on the
+    // worker thread before a socket exists, so no message can be parsed at the
+    // wrong scale and then silently re-scaled mid-book.
+    void SetContractSize(QtyUnits contract_size_scaled) { contract_size_ = contract_size_scaled; }
+
+    [[nodiscard]] QtyUnits ContractSize() const { return contract_size_; }
+
+   private:
+    QtyUnits contract_size_ = kScaleFactor;
 };
+
+// Reads a /api/v5/public/instruments response and returns `inst_id`'s contract
+// size (ctVal), scaled by kScaleFactor.
+//
+// Returns nullopt when the body is malformed, OKX reports a non-zero `code`,
+// `inst_id` is absent, or - deliberately - when the instrument is not a plain
+// linear contract with ctMult == 1:
+//
+//   - ctType != "linear": an INVERSE contract's ctVal is denominated in the
+//     QUOTE currency (USD), not the base, so multiplying a size by it would
+//     produce a number that is not a BTC quantity at all.
+//   - ctMult != 1: OKX's own size-to-base conversion is then not ctVal alone,
+//     and guessing the rest is exactly the kind of invented number that
+//     silently corrupts a book.
+//
+// Refusing is safe - the caller stops the venue - while guessing is not.
+//
+// A free function, not a member: it runs once at startup on the worker thread
+// and must not touch OkxParser's simdjson buffer, which belongs to the
+// io_context thread.
+std::optional<QtyUnits> ParseOkxContractSize(std::string_view body, std::string_view inst_id);
 
 }  // namespace market_data

@@ -2,6 +2,7 @@
 #include "okx_parser.h"
 #include "continuity.h"
 #include "logger/logger.h"
+#include "md_provider/rest.h"
 #include "types/venue.h"
 #include <fmt/format.h>
 
@@ -12,11 +13,21 @@ namespace {
 // OKX uses "BTC-USDT", not "BTCUSDT" - insert a hyphen before the quote
 // currency. Simple and matches every symbol this project uses (all end in
 // USDT).
+//
+// KEY: the futures instrument is a PERPETUAL SWAP and has its own instId,
+// "BTC-USDT-SWAP". It is a different instrument from "BTC-USDT" with its own
+// order book, its own seqId chain and - the part that bites - its own size
+// units: swap sizes are in CONTRACTS, spot sizes are in BTC. Subscribing to
+// the spot instId for a futures book would silently deliver spot data into a
+// futures book, which is exactly what MarketType on the key exists to prevent.
 std::string ToOkxInstId(InstrumentKey instrument) {
     std::string symbol = VenueConverter::ToInstrumentString(instrument.Symbol());
     size_t usdt_pos = symbol.find("USDT");
     if (usdt_pos != std::string::npos) {
         symbol.insert(usdt_pos, "-");
+    }
+    if (instrument.Market() == MarketType::kFutures) {
+        symbol += "-SWAP";
     }
     return symbol;
 }
@@ -24,7 +35,55 @@ std::string ToOkxInstId(InstrumentKey instrument) {
 }  // namespace
 
 OKXProvider::OKXProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
-    : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {}
+    : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {
+    // OKX's path (/ws/v5/public) carries no {symbol} - the instId goes in the
+    // subscribe frame. Same reasoning as Bybit: resolve anyway so the path
+    // shape stays purely a config concern.
+    ResolveStreamPaths(ToOkxInstId(config.instrument));
+}
+
+bool OKXProvider::OnReconnect() {
+    // Spot sizes are already in the base currency - nothing to resolve, and
+    // parser_ keeps its 1.0 default.
+    if (config.instrument.Market() != MarketType::kFutures || contract_size_resolved_) {
+        return true;
+    }
+
+    const std::string inst_id = ToOkxInstId(config.instrument);
+
+    // KEY: this blocking GET happens HERE, on the worker thread, before
+    // ioc.restart() and before a single socket exists. Doing it concurrently
+    // with the stream would let the first book messages be parsed at 1.0x and
+    // then silently re-scaled to 0.01x once the answer arrived - a book that
+    // is 100x wrong at the top and correct lower down, with no error anywhere.
+    // Blocking is normally forbidden in a provider; this is the one place it
+    // is not, because there is no read loop yet to stall.
+    const std::string target = fmt::format("{}?instType=SWAP&instId={}", config.rest_instruments_path, inst_id);
+    const std::optional<std::string> body = HttpsGet(config.rest_host, config.rest_port, target);
+
+    const std::optional<QtyUnits> contract_size = body ? ParseOkxContractSize(*body, inst_id) : std::nullopt;
+    if (!contract_size.has_value()) {
+        // KEY: refuse to connect rather than fall back to 1.0. A default of
+        // 1.0 would publish OKX swap sizes 100x oversized into a consolidated
+        // futures book it shares with Binance and Bybit, dominating every
+        // price level and wrecking the notional bands - and it would look like
+        // a deep market, not like an error. A venue that is ABSENT is safe;
+        // a venue that is wrong is not.
+        //
+        // Returning false routes this through HandleReconnection(), so a
+        // transient network failure backs off and retries while a persistent
+        // one eventually stops the provider.
+        Logger::Log(LogLevel::kError, "[{}] could not resolve contract size for {} - refusing to connect ({})",
+                    venue_market_str_, inst_id, body ? "unexpected response" : "request failed");
+        return false;
+    }
+
+    parser_.SetContractSize(*contract_size);
+    contract_size_resolved_ = true;
+    Logger::Log(LogLevel::kInfo, "[{}] {} contract size {} - sizes convert from contracts to base currency",
+                venue_market_str_, inst_id, static_cast<double>(*contract_size) / static_cast<double>(kScaleFactor));
+    return true;
+}
 
 std::string OKXProvider::DepthSubscriptionMessage() const {
     return fmt::format(R"({{"op":"subscribe","args":[{{"channel":"books","instId":"{}"}}]}})",
@@ -81,8 +140,8 @@ void OKXProvider::OnDepthMessage(const std::string& message, uint32_t conn_index
             return;
         case ContinuityAction::kGap:
             // Chain broken: the book is WRONG, not merely stale (§4.2).
-            Logger::Log(LogLevel::kWarning, "[OKX] depth gap: expected prevSeqId={}, got {} - resyncing",
-                        last_depth_seq_, update->prev_seq);
+            Logger::Log(LogLevel::kWarning, "[{}] depth gap: expected prevSeqId={}, got {} - resyncing",
+                        venue_market_str_, last_depth_seq_, update->prev_seq);
             last_depth_seq_ = 0;
             RequestResync();
             return;

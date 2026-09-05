@@ -102,6 +102,7 @@ void PrintUsage(const char* program_name) {
                "\n"
                "  --server=host:port              default localhost:50051\n"
                "  --symbol=BTCUSDT                default BTCUSDT\n"
+               "  --market=spot|futures           REQUIRED, no default\n"
                "\n"
                "  --bbo                           subscribe to consolidated BBO\n"
                "  --volume_bands                  subscribe to volume bands, server defaults\n"
@@ -109,8 +110,11 @@ void PrintUsage(const char* program_name) {
                "  --price_bands                   subscribe to price bands, server defaults\n"
                "  --price_band=50,100,200,500     subscribe to price bands, these bps\n"
                "\n"
-               "At least one feed is required. Notional values take K/M suffixes;\n"
-               "a bare number is dollars, so --notional_band=1 sweeps one dollar.\n",
+               "--market and at least one feed are required. Spot and futures are\n"
+               "separate subscriptions, so the market is never assumed.\n"
+               "\n"
+               "Notional values take K/M suffixes; a bare number is dollars, so\n"
+               "--notional_band=1 sweeps one dollar.\n",
                program_name);
 }
 
@@ -130,6 +134,18 @@ ClientConfig ClientConfig::ParseFromArgs(int argc, char* argv[]) {
             config.server_address = std::string(*value);
         } else if (auto value = FlagValue(arg, "--symbol")) {
             config.symbol = std::string(*value);
+        } else if (auto value = FlagValue(arg, "--market")) {
+            // Only the two real markets are accepted. "unspecified" is not
+            // spellable on purpose - it is the server's error case, not a
+            // choice a user can make.
+            if (*value == "spot") {
+                config.market = wire::SPOT;
+            } else if (*value == "futures") {
+                config.market = wire::FUTURES;
+            } else {
+                fmt::print(stderr, "bad --market value: '{}' (expected spot or futures)\n", *value);
+                std::exit(2);
+            }
         } else if (auto value = FlagValue(arg, "--notional_band")) {
             config.want_volume_bands = true;
             for (const std::string& token : SplitCsv(*value)) {
@@ -157,6 +173,12 @@ ClientConfig ClientConfig::ParseFromArgs(int argc, char* argv[]) {
 wire::SubscribeRequest ClientConfig::ToRequest() const {
     wire::SubscribeRequest request;
     request.set_symbol(symbol);
+    // Left UNSPECIFIED when absent rather than substituted here. Callers check
+    // HasMarket() first; if one forgets, the server rejects the request - the
+    // failure stays loud instead of silently becoming a spot subscription.
+    if (market.has_value()) {
+        request.set_market(*market);
+    }
     request.set_bbo(want_bbo);
 
     // Calling mutable_*() is what marks an optional sub-message PRESENT.

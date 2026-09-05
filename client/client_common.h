@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,22 @@ struct ClientConfig {
     std::string server_address = "localhost:50051";  // Compose: "aggregator:50051"
     std::string symbol = "BTCUSDT";
 
+    // REQUIRED, and deliberately WITHOUT a default. Spot and futures are two
+    // separate subscriptions - (symbol, market) selects the book - so there is
+    // no value this could sensibly fall back to.
+    //
+    // KEY: optional<> rather than a plain wire::MarketType, so "not given"
+    // stays distinguishable from "chose spot". On the wire that distinction is
+    // impossible - a proto3 enum has no presence and MARKET_UNSPECIFIED is
+    // just zero - which is precisely why the server rejects it and why the
+    // check has to happen HERE, before the request is built.
+    //
+    // wire::MarketType, not the domain MarketType: a client speaks the wire
+    // protocol and has no domain layer. Holding the domain type would mean
+    // linking wire_translation, and with it md_core, into every client binary
+    // to map a two-value enum.
+    std::optional<wire::MarketType> market;
+
     // The want_* flags are deliberately separate from the threshold vectors:
     // an empty vector alone cannot distinguish "subscribed, use server
     // defaults" from "not subscribed at all". That is the same ambiguity the
@@ -27,6 +44,7 @@ struct ClientConfig {
 
     // Flags, all optional:
     //   --server=host:port     --symbol=BTCUSDT
+    //   --market=spot|futures                 REQUIRED
     //   --bbo
     //   --volume_bands                        (subscribe, server defaults)
     //   --notional_band=1,100K,1M,50M         (subscribe, these thresholds)
@@ -45,6 +63,11 @@ struct ClientConfig {
     // False when no feed was requested - the server would reject it, so the
     // caller can fail early with a usage message instead.
     bool HasAnyFeed() const { return want_bbo || want_volume_bands || want_price_bands; }
+
+    // Same early-failure idea as HasAnyFeed: without a market the server
+    // answers INVALID_ARGUMENT after a full connect/subscribe round trip, and
+    // a usage message is a better answer than a gRPC status string.
+    bool HasMarket() const { return market.has_value(); }
 };
 
 void PrintUsage(const char* program_name);

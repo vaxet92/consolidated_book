@@ -16,6 +16,33 @@ wire::Venue ToWire(VenueId venue) {
     return wire::VENUE_UNSPECIFIED;
 }
 
+wire::MarketType ToWire(MarketType market) {
+    switch (market) {
+        case MarketType::kSpot:
+            return wire::SPOT;
+        case MarketType::kFutures:
+            return wire::FUTURES;
+    }
+    return wire::MARKET_UNSPECIFIED;  // unreachable - the enum has no other value
+}
+
+std::optional<MarketType> FromWire(wire::MarketType market) {
+    switch (market) {
+        case wire::SPOT:
+            return MarketType::kSpot;
+        case wire::FUTURES:
+            return MarketType::kFutures;
+        default:
+            // MARKET_UNSPECIFIED, and anything a newer client might send that
+            // this build does not know. Both are rejected by the caller.
+            //
+            // A `default` rather than an exhaustive list: proto3 enums are
+            // OPEN, so an unknown value really can arrive over the wire and
+            // must not be a compile-time-only concern.
+            return std::nullopt;
+    }
+}
+
 VenueWireTable MakeVenueWireTable(const std::function<std::string_view(VenueSlot)>& venue_name) {
     VenueWireTable table{};  // VENUE_UNSPECIFIED everywhere by default
     for (size_t i = 0; i < kMaxVenues; ++i) {

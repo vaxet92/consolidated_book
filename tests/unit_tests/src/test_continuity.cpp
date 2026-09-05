@@ -105,17 +105,17 @@ TEST(ContinuityTest, OkxFirstMessageBeforeAnySnapshotIsAGap) {
 
 // -------------------------------------------------------------- Binance ---
 
-TEST(ContinuityTest, BinanceChainedEventApplies) {
+TEST(ContinuityTest, BinanceSpotChainedEventApplies) {
     uint64_t last_u = 100;
     // U == last_u + 1
-    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(110, 101), last_u), ContinuityAction::kApply);
+    EXPECT_EQ(CheckBinanceSpotContinuity(MakeDelta(110, 101), last_u), ContinuityAction::kApply);
     EXPECT_EQ(last_u, 110u) << "last_u advances to u (final id), not U (first id)";
 }
 
-TEST(ContinuityTest, BinanceSkippedEventIsAGap) {
+TEST(ContinuityTest, BinanceSpotSkippedEventIsAGap) {
     uint64_t last_u = 100;
     // U == 105, but we expected 101 - events 101..104 were missed.
-    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(110, 105), last_u), ContinuityAction::kGap);
+    EXPECT_EQ(CheckBinanceSpotContinuity(MakeDelta(110, 105), last_u), ContinuityAction::kGap);
     EXPECT_EQ(last_u, 100u);
 }
 
@@ -129,44 +129,44 @@ TEST(ContinuityTest, BinanceSkippedEventIsAGap) {
 //
 // Observed live: "depth synced at lastUpdateId=99584596841" followed
 // immediately by "expected U=99584596842, got 99584596810".
-TEST(ContinuityTest, BinanceStraddlingEventAfterSnapshotApplies) {
+TEST(ContinuityTest, BinanceSpotStraddlingEventAfterSnapshotApplies) {
     uint64_t last_u = 100;
     // U = 90 is 11 BELOW last_u + 1, but u = 110 is above it: the event covers
     // some ids already inside the snapshot plus some new ones.
-    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(110, 90), last_u), ContinuityAction::kApply);
+    EXPECT_EQ(CheckBinanceSpotContinuity(MakeDelta(110, 90), last_u), ContinuityAction::kApply);
     EXPECT_EQ(last_u, 110u);
 }
 
 // The WS stream can lag the REST snapshot, so events entirely older than
 // lastUpdateId keep arriving after we go live. They are already reflected in
 // the book - dropping them is right, calling them a gap is not.
-TEST(ContinuityTest, BinanceEventFullyInsideTheSnapshotIsIgnored) {
+TEST(ContinuityTest, BinanceSpotEventFullyInsideTheSnapshotIsIgnored) {
     uint64_t last_u = 100;
-    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(95, 90), last_u), ContinuityAction::kIgnore);
+    EXPECT_EQ(CheckBinanceSpotContinuity(MakeDelta(95, 90), last_u), ContinuityAction::kIgnore);
     EXPECT_EQ(last_u, 100u) << "an ignored event must not move the sequence";
 }
 
 // Boundary: u exactly equals last_u. Nothing new, so nothing to apply.
-TEST(ContinuityTest, BinanceEventEndingExactlyAtLastUIsIgnored) {
+TEST(ContinuityTest, BinanceSpotEventEndingExactlyAtLastUIsIgnored) {
     uint64_t last_u = 100;
-    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(100, 95), last_u), ContinuityAction::kIgnore);
+    EXPECT_EQ(CheckBinanceSpotContinuity(MakeDelta(100, 95), last_u), ContinuityAction::kIgnore);
     EXPECT_EQ(last_u, 100u);
 }
 
 // One past the boundary is a real gap and must stay one.
-TEST(ContinuityTest, BinanceOnePastTheJoinIsStillAGap) {
+TEST(ContinuityTest, BinanceSpotOnePastTheJoinIsStillAGap) {
     uint64_t last_u = 100;
-    EXPECT_EQ(CheckBinanceContinuity(MakeDelta(110, 102), last_u), ContinuityAction::kGap);
+    EXPECT_EQ(CheckBinanceSpotContinuity(MakeDelta(110, 102), last_u), ContinuityAction::kGap);
     EXPECT_EQ(last_u, 100u);
 }
 
 // KEY: the two implementations of the SAME rule must agree. Reconcile decides
-// whether a buffered event can join the snapshot; CheckBinanceContinuity
+// whether a buffered event can join the snapshot; CheckBinanceSpotContinuity
 // decides whether a live one can. They diverged - reconcile accepted the
 // straddle, the live check rejected it - and nothing compared them.
 //
 // This drives one event through both and asserts they reach the same verdict.
-TEST(ContinuityTest, BinanceLiveAndReconcilePathsAgreeOnTheJoinRule) {
+TEST(ContinuityTest, BinanceSpotLiveAndReconcilePathsAgreeOnTheJoinRule) {
     constexpr uint64_t kLastUpdateId = 100;
 
     struct Case {
@@ -184,7 +184,7 @@ TEST(ContinuityTest, BinanceLiveAndReconcilePathsAgreeOnTheJoinRule) {
 
     for (const Case& c : cases) {
         uint64_t last_u = kLastUpdateId;
-        const auto live = CheckBinanceContinuity(MakeDelta(c.u, c.U), last_u);
+        const auto live = CheckBinanceSpotContinuity(MakeDelta(c.u, c.U), last_u);
         const std::vector<BookUpdate> pending = {MakeDelta(c.u, c.U)};
         const auto reconciled = ReconcileBinanceSnapshot(kLastUpdateId, pending);
 

@@ -42,7 +42,7 @@ ContinuityAction CheckOkxContinuity(const BookUpdate& update, uint64_t& last_seq
     return ContinuityAction::kApply;
 }
 
-ContinuityAction CheckBinanceContinuity(const BookUpdate& update, uint64_t& last_u) {
+ContinuityAction CheckBinanceSpotContinuity(const BookUpdate& update, uint64_t& last_u) {
     // KEY: U and u answer DIFFERENT questions. `prev_seq` (U) is where this
     // event's coverage STARTS, `seq` (u) is where it ENDS. Continuity is
     // checked against U and advanced by u, and the two diverge at exactly one
@@ -77,6 +77,30 @@ ContinuityAction CheckBinanceContinuity(const BookUpdate& update, uint64_t& last
 
     // U > last_u + 1: events between last_u and U were genuinely missed, so
     // the book is now WRONG rather than merely stale.
+    return ContinuityAction::kGap;
+}
+
+ContinuityAction CheckBinanceFuturesContinuity(uint64_t chain_seq, uint64_t event_seq, uint64_t& last_u) {
+    // Same "the WS can lag the REST snapshot" case CheckBinanceSpotContinuity
+    // guards against: an event entirely inside what was already emitted
+    // (snapshot + replayed buffer). Already reflected in the book - ignore,
+    // not a gap. event_seq (u) is a real per-symbol high-water mark even
+    // though its numeric SPACING is shared across symbols, so this compare is
+    // still meaningful.
+    if (event_seq <= last_u) {
+        return ContinuityAction::kIgnore;
+    }
+
+    // The real rule: THIS message must chain from the last one WE actually
+    // saw for this symbol. Verified live, 906 combined Bybit+OKX futures
+    // messages showed their existing rules already hold unchanged - Binance
+    // futures is the one venue+market that needed a genuinely different
+    // signal, and pu is it.
+    if (chain_seq == last_u) {
+        last_u = event_seq;
+        return ContinuityAction::kApply;
+    }
+
     return ContinuityAction::kGap;
 }
 

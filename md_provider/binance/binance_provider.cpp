@@ -1,12 +1,13 @@
 #include "binance_provider.h"
 #include "binance_parser.h"
-#include "binance_rest.h"
+#include "md_provider/rest.h"
 #include "continuity.h"
 #include "logger/logger.h"
 #include "types/venue.h"
 #include <fmt/format.h>
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -29,12 +30,13 @@ std::string UpperSymbol(InstrumentKey instrument) {
 
 BinanceProvider::BinanceProvider(const ProviderConfig& config, CallBack callback, QuoteCallBack quote_callback)
     : Provider(config, std::move(callback), std::move(quote_callback)), parser_(config.depth) {
-    std::string symbol = ToLowerSymbol(config.instrument);
-    depth_path_ = fmt::format("/ws/{}@depth@100ms", symbol);
-    bbo_path_ = fmt::format("/ws/{}@bookTicker", symbol);
+    // Binance streams are named with a LOWERCASE symbol ("btcusdt@depth@100ms").
+    // The path shape itself now comes from venues_config.json - only the
+    // spelling of the symbol is Binance's business.
+    ResolveStreamPaths(ToLowerSymbol(config.instrument));
 }
 
-void BinanceProvider::OnReconnect() {
+bool BinanceProvider::OnReconnect() {
     // Per-connection state only. Binance never re-sends a snapshot on the
     // stream, so without this a resync would leave us in kLive with a stale
     // last_depth_u_ and resync forever.
@@ -43,18 +45,27 @@ void BinanceProvider::OnReconnect() {
     snapshot_attempts_ = 0;
     pending_.clear();
     last_depth_u_ = 0;
+    // Nothing here can fail: the REST snapshot is fetched later, off the
+    // io_context thread, and its failures are handled by the resync path.
+    return true;
 }
 
 void BinanceProvider::FetchSnapshotAsync() {
     snapshot_requested_ = true;
     ++snapshot_attempts_;
 
-    // Depth is a REST query parameter on Binance - already resolved to a
-    // valid limit (5/10/20/50/100/500/1000/5000) by SelectDepthTier. An
-    // arbitrary value here would be rejected by the API.
-    std::string target = fmt::format("/api/v3/depth?symbol={}&limit={}", UpperSymbol(config.instrument), config.depth);
-    std::string host(kBinanceRestHost);
-    std::string port(kBinanceRestPort);
+    // Depth is a REST query parameter on Binance - already resolved to a valid
+    // limit by SelectDepthTier. An arbitrary value here would be rejected.
+    //
+    // KEY: the valid limits differ by MARKET. Spot accepts up to 5000; futures
+    // (/fapi/v1/depth) caps at 1000 and returns {"code":-1130} above it -
+    // measured, not assumed. The path comes from config so spot and futures
+    // reach different endpoints, but the TIER TABLE is still shared - see the
+    // note in config/config.h.
+    std::string target =
+        fmt::format("{}?symbol={}&limit={}", config.rest_depth_path, UpperSymbol(config.instrument), config.depth);
+    std::string host = config.rest_host;
+    std::string port = config.rest_port;
     VenueId venue = config.venue_id;
     InstrumentKey instrument = config.instrument;
 
@@ -75,7 +86,7 @@ void BinanceProvider::FetchSnapshotAsync() {
         // shared with the message handlers.
         PostToIoContext([this, snapshot = std::move(snapshot)]() mutable {
             if (!snapshot) {
-                Logger::Log(LogLevel::kError, "[BINANCE] depth snapshot fetch failed");
+                Logger::Log(LogLevel::kError, "[{}] depth snapshot fetch failed", venue_market_str_);
                 if (snapshot_attempts_ >= kMaxSnapshotAttempts) {
                     RequestResync();
                     return;
@@ -88,12 +99,13 @@ void BinanceProvider::FetchSnapshotAsync() {
                 // Snapshot predates our buffered events - it cannot be
                 // joined onto them. Refetch a newer one.
                 if (snapshot_attempts_ >= kMaxSnapshotAttempts) {
-                    Logger::Log(LogLevel::kError, "[BINANCE] snapshot never caught up after {} attempts - resyncing",
-                                snapshot_attempts_);
+                    Logger::Log(LogLevel::kError, "[{}] snapshot never caught up after {} attempts - resyncing",
+                                venue_market_str_, snapshot_attempts_);
                     RequestResync();
                     return;
                 }
-                Logger::Log(LogLevel::kWarning, "[BINANCE] snapshot too old to join buffered events - refetching");
+                Logger::Log(LogLevel::kWarning, "[{}] snapshot too old to join buffered events - refetching",
+                            venue_market_str_);
                 FetchSnapshotAsync();
             }
         });
@@ -110,6 +122,13 @@ bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
         return false;
     }
 
+    // The `u` of the last event we actually SAW on the wire - captured before
+    // the replay loop below, which moves out of pending_ and would leave
+    // pending_.back() moved-from (same hazard the loop's own comment refuses
+    // to depend on).
+    const std::optional<uint64_t> last_buffered_seq =
+        pending_.empty() ? std::nullopt : std::optional<uint64_t>(pending_.back().seq);
+
     snapshot.recv_ts_ns = GetCurrentTimeMs() * kTsNsMultiplier;
     Emit(std::move(snapshot));
     last_depth_u_ = last_update_id;
@@ -121,10 +140,32 @@ bool BinanceProvider::ReconcileSnapshot(BookUpdate snapshot) {
         last_depth_u_ = pending_[i].seq;
         Emit(std::move(pending_[i]));
     }
+
+    // KEY: futures continuity chains on `pu` and demands an EXACT match, so
+    // last_depth_u_ must be the `u` of a REAL WS EVENT - never lastUpdateId.
+    //
+    // lastUpdateId is a single update id, while WS events cover RANGES [U, u],
+    // so it need not land on any event boundary; and the REST snapshot is
+    // usually AHEAD of the 100ms-throttled stream. When every buffered event
+    // is already inside the snapshot the loop above never runs, leaving
+    // last_depth_u_ at lastUpdateId - and the next live event's pu, which
+    // chains from the last real WS event, then compares BELOW it and reports a
+    // gap that never happened. Measured before this fix: a false resync every
+    // ~130s, with pu ~1800 below the expected value.
+    //
+    // Spot is unaffected: its rule is a coverage-range test (U <= last_u + 1)
+    // that was built to absorb exactly this REST/WS misalignment, which is why
+    // this correction is futures-only.
+    //
+    // When the loop DID run this is a no-op - it assigns the same value the
+    // loop's last iteration already did.
+    if (config.instrument.Market() == MarketType::kFutures && last_buffered_seq.has_value()) {
+        last_depth_u_ = *last_buffered_seq;
+    }
     pending_.clear();
 
     sync_state_ = SyncState::kLive;
-    Logger::Log(LogLevel::kInfo, "[BINANCE] depth synced at lastUpdateId={}, now live", last_update_id);
+    Logger::Log(LogLevel::kInfo, "[{}] depth synced at lastUpdateId={}, now live", venue_market_str_, last_update_id);
     return true;
 }
 
@@ -173,7 +214,7 @@ void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_i
             FetchSnapshotAsync();
         }
         if (pending_.size() >= kMaxPendingEvents) {
-            Logger::Log(LogLevel::kError, "[BINANCE] buffered {} events without a snapshot - resyncing",
+            Logger::Log(LogLevel::kError, "[{}] buffered {} events without a snapshot - resyncing", venue_market_str_,
                         pending_.size());
             RequestResync();
             return;
@@ -182,14 +223,34 @@ void BinanceProvider::OnDepthMessage(const std::string& message, uint32_t conn_i
         return;
     }
 
-    // Live: each event must continue the chain, U == last_u + 1 (§4.3).
-    // Binance never sends a snapshot on the stream, so kReset/kIgnore
-    // cannot occur here - only kApply or kGap.
-    if (CheckBinanceContinuity(*update, last_depth_u_) == ContinuityAction::kGap) {
-        Logger::Log(LogLevel::kWarning, "[BINANCE] depth gap: expected U={}, got {} - resyncing", last_depth_u_ + 1,
-                    update->prev_seq);
-        RequestResync();
-        return;
+    // Live: each event must continue the chain. Binance never sends a
+    // snapshot on the stream, so kReset/kIgnore cannot occur here - only
+    // kApply or kGap. Which RULE decides that differs by market - see
+    // CheckBinanceFuturesContinuity for why spot's U-based rule is wrong for
+    // futures (measured: 14 false-positive resyncs in 14 seconds).
+    if (config.instrument.Market() == MarketType::kFutures) {
+        const std::optional<uint64_t> chain_seq = parser_.LastChainSeq();
+        // No pu on a message that should have one is not "assume it's fine" -
+        // continuity cannot be verified without it, so this takes the same
+        // fail-safe direction as everything else here: resync rather than
+        // apply an update we cannot actually vouch for.
+        const ContinuityAction action = chain_seq.has_value()
+                                            ? CheckBinanceFuturesContinuity(*chain_seq, update->seq, last_depth_u_)
+                                            : ContinuityAction::kGap;
+        if (action == ContinuityAction::kGap) {
+            Logger::Log(LogLevel::kWarning, "[{}] futures depth gap: expected pu={}, got {} - resyncing",
+                        venue_market_str_, last_depth_u_,
+                        chain_seq.has_value() ? static_cast<int64_t>(*chain_seq) : -1);
+            RequestResync();
+            return;
+        }
+    } else {
+        if (CheckBinanceSpotContinuity(*update, last_depth_u_) == ContinuityAction::kGap) {
+            Logger::Log(LogLevel::kWarning, "[{}] depth gap: expected U={}, got {} - resyncing", venue_market_str_,
+                        last_depth_u_ + 1, update->prev_seq);
+            RequestResync();
+            return;
+        }
     }
     Emit(std::move(*update));
 }

@@ -7,6 +7,8 @@ using namespace market_data;
 // feed in isolation.
 int main() {
     ClientConfig config;
+    // Explicit, not a default - see bbo_sub.cpp.
+    config.market = wire::SPOT;
     config.want_volume_bands = true;  // empty notional_bands = server defaults
 
     return RunSubscription(config, "volume_band_sub", config.ToRequest(), PrintVolumeBands);

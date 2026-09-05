@@ -116,9 +116,12 @@ TEST(ParseConfigJsonTest, OneEntryNamingBothMarketsAlsoConsumesOneId) {
     ASSERT_EQ(result.config.instruments.size(), 1u);
     EXPECT_EQ(result.config.instruments[0].markets, (std::vector<MarketType>{MarketType::kSpot, MarketType::kFutures}));
 
-    // Parsing accepts futures - Validate() is where "not implemented" is
-    // enforced, kept separate on purpose (see NOT IMPLEMENTED tests below).
-    EXPECT_FALSE(result.config.Validate());
+    // Both markets pass validation now that both have providers behind them.
+    // This assertion used to expect false, back when Validate() rejected
+    // futures outright; the subject of this test is the REGISTRY ID above -
+    // one symbol consuming one id regardless of how many markets name it -
+    // and that is unchanged either way.
+    EXPECT_TRUE(result.config.Validate());
 }
 
 // --- malformed documents ------------------------------------------------------
@@ -242,7 +245,14 @@ TEST(ParseConfigJsonTest, RejectsTheSameSymbolAndMarketListedTwice) {
 
 // --- Validate(): policy, not syntax -------------------------------------------
 
-TEST(ServerConfigValidateTest, RejectsFuturesAsNotImplemented) {
+// This test used to assert the opposite - that Validate() rejected futures as
+// "not wired to a provider yet". Its own comment predicted the change:
+// "starts working the moment Validate's check is removed, with no other
+// change." That is exactly what happened once the futures streams landed and
+// were verified live, so the assertion is inverted rather than deleted - the
+// config layer's contract genuinely changed, and a test that still demanded a
+// rejection would be pinning down behaviour we deliberately removed.
+TEST(ServerConfigValidateTest, AcceptsFuturesNowThatProvidersExist) {
     InstrumentEntry entry;
     entry.symbol = "BTCUSDT";
     entry.markets = {MarketType::kFutures};
@@ -251,11 +261,21 @@ TEST(ServerConfigValidateTest, RejectsFuturesAsNotImplemented) {
     config.venues = {VenueId::BINANCE};
     config.instruments = {entry};
 
-    // The schema accepts "futures" (parsing above proves it); Validate() is
-    // the one place that says "not wired to a provider yet" - kept separate so
-    // a config can be WRITTEN ahead of the feature landing, and starts working
-    // the moment Validate's check is removed, with no other change.
-    EXPECT_FALSE(config.Validate());
+    EXPECT_TRUE(config.Validate());
+}
+
+// Both markets for one symbol is the case the InstrumentKey packing exists
+// for: two separate books under one config entry, never merged.
+TEST(ServerConfigValidateTest, AcceptsSpotAndFuturesTogether) {
+    InstrumentEntry entry;
+    entry.symbol = "BTCUSDT";
+    entry.markets = {MarketType::kSpot, MarketType::kFutures};
+
+    ServerConfig config;
+    config.venues = {VenueId::BINANCE, VenueId::BYBIT};
+    config.instruments = {entry};
+
+    EXPECT_TRUE(config.Validate());
 }
 
 TEST(ServerConfigValidateTest, AcceptsSpotOnly) {

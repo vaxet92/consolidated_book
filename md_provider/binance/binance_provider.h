@@ -15,15 +15,12 @@ class BinanceProvider : public Provider {
    protected:
     void OnDepthMessage(const std::string& message, uint32_t conn_index) override;
     void OnBboMessage(const std::string& message, uint32_t conn_index) override;
-    void OnReconnect() override;
+    bool OnReconnect() override;
 
     // Binance connects directly to a per-stream URL (e.g. /ws/btcusdt@depth@100ms) -
     // no subscribe frame needed after connecting, unlike Bybit/OKX.
     std::string DepthSubscriptionMessage() const override { return ""; }
     std::string BboSubscriptionMessage() const override { return ""; }
-
-    const char* GetDepthPath() const override { return depth_path_.c_str(); }
-    const char* GetBboPath() const override { return bbo_path_.c_str(); }
 
    private:
     // Binance's depth stream is DIFFERENTIAL only - it never sends a
@@ -55,9 +52,6 @@ class BinanceProvider : public Provider {
     // A snapshot older than the buffered events can't be joined; refetch.
     // Capped so a persistently stale endpoint can't loop forever.
     static constexpr int kMaxSnapshotAttempts = 5;
-
-    std::string depth_path_;
-    std::string bbo_path_;
 
     // All of these are only touched on the io_context thread (the snapshot
     // result is marshalled back there via net::post), so no locking.

@@ -54,6 +54,14 @@ std::optional<BookUpdate> BinanceParser::ParseDepthMessage(std::string_view mess
         auto final_id_result = doc["u"].get_uint64();
         update.seq = final_id_result.error() ? 0 : final_id_result.value();
 
+        // FUTURES only: "pu" sits right after "u" in wire order, so reading
+        // it here stays forward-only. Absent on spot -> error -> nullopt,
+        // which is exactly "this message has no chain signal to give".
+        // Always assigned (never left untouched), so a stale value from a
+        // previous futures call can never survive into this one's result.
+        auto chain_seq_result = doc["pu"].get_uint64();
+        last_chain_seq_ = chain_seq_result.error() ? std::nullopt : std::optional<uint64_t>(chain_seq_result.value());
+
         auto bids_result = doc["b"].get_array();
         if (!bids_result.error()) {
             AppendLevels(bids_result.value(), update.bids);

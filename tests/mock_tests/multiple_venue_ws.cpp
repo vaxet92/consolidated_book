@@ -3,7 +3,9 @@
 #include "md_provider/binance/binance_provider.h"
 #include "md_provider/bybit/bybit_provider.h"
 #include "md_provider/okx/okx_provider.h"
+#include "config/venues_config.h"
 #include <chrono>
+#include <iostream>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -33,28 +35,47 @@ int main() {
     // scope, for the whole run is what avoids that.
     std::vector<std::unique_ptr<market_data::Provider>> providers;
 
-    market_data::ProviderConfig binance_config = {
-        .venue_id = VenueId::BINANCE,
-        .instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot),
-        .host = std::string(kBinanceHost),
-        .port = std::string(kBinancePort),
+    // Endpoints come from the same venues_config.json the aggregator uses, so
+    // this test cannot drift from production by hardcoding a host that has
+    // since moved. It must therefore run from a directory containing that file.
+    const auto venues_result = market_data::VenuesConfig::LoadFile(std::string(market_data::kVenuesConfigFileName));
+    if (!venues_result.Ok()) {
+        std::cerr << venues_result.error << "\n";
+        return 1;
+    }
+
+    const InstrumentKey instrument_key = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot);
+    const MarketType market = instrument_key.Market();
+
+    auto make_config = [&](VenueId venue) {
+        const market_data::VenueEndpoints& endpoints = *venues_result.config.Find(venue, market);
+        return market_data::ProviderConfig{
+            .venue_id = venue,
+            .instrument = instrument_key,
+            .host = endpoints.ws_host,
+            .port = endpoints.ws_port,
+            .depth_path = endpoints.depth_path,
+            .bbo_path = endpoints.bbo_path,
+            .rest_host = endpoints.rest_host,
+            .rest_port = endpoints.rest_port,
+            .rest_depth_path = endpoints.rest_depth_path,
+        };
     };
+
+    for (const VenueId venue : VenueIdArray) {
+        if (venues_result.config.Find(venue, market) == nullptr) {
+            std::cerr << "no endpoints for " << VenueConverter::ToVenueString(venue) << "\n";
+            return 1;
+        }
+    }
+
+    market_data::ProviderConfig binance_config = make_config(VenueId::BINANCE);
     providers.push_back(std::make_unique<market_data::BinanceProvider>(binance_config, on_update));
 
-    market_data::ProviderConfig bybit_config = {
-        .venue_id = VenueId::BYBIT,
-        .instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot),
-        .host = std::string(kBybitHost),
-        .port = std::string(kBybitPort),
-    };
+    market_data::ProviderConfig bybit_config = make_config(VenueId::BYBIT);
     providers.push_back(std::make_unique<market_data::BybitProvider>(bybit_config, on_update));
 
-    market_data::ProviderConfig okx_config = {
-        .venue_id = VenueId::OKX,
-        .instrument = MakeKey(InstrumentId::BTCUSDT, MarketType::kSpot),
-        .host = std::string(kOkxHost),
-        .port = std::string(kOkxPort),
-    };
+    market_data::ProviderConfig okx_config = make_config(VenueId::OKX);
     providers.push_back(std::make_unique<market_data::OKXProvider>(okx_config, on_update));
 
     for (auto& provider : providers) {

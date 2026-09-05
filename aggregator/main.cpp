@@ -1,5 +1,6 @@
 #include "aggregator_service.h"
 #include "config/config.h"
+#include "config/venues_config.h"
 #include "latency_recorder.h"
 #include "md_core/md_core.h"
 #include "md_provider/binance/binance_provider.h"
@@ -63,6 +64,18 @@ int main(int argc, char* argv[]) {
         return 2;
     }
     ServerConfig server_config = config_result.config;
+
+    // Venue endpoints, from a SEPARATE file on purpose. server_config.json is
+    // the operator's session ("which venues, which instruments, how deep");
+    // venues_config.json is how those venues are reached. The two change for
+    // different reasons and at different rates - endpoints are near-static and
+    // shared, the session is per-run.
+    const VenuesConfigLoadResult venues_result = VenuesConfig::LoadFile(std::string(kVenuesConfigFileName));
+    if (!venues_result.Ok()) {
+        Logger::Log(LogLevel::kError, "[Aggregator] {}", venues_result.error);
+        return 2;
+    }
+    const VenuesConfig& venues_config = venues_result.config;
 
     // CLI flags win over the file - the same rule --connections already used
     // against a config that could not name it, now applied consistently.
@@ -143,6 +156,23 @@ int main(int argc, char* argv[]) {
         return std::find(enabled_venues.begin(), enabled_venues.end(), venue) != enabled_venues.end();
     };
 
+    // Every enabled venue must have endpoints for the market this run serves.
+    //
+    // KEY: checked up front, before any provider is built, rather than at each
+    // construction site. A venue enabled in server_config.json but missing from
+    // venues_config.json would otherwise start a process that connects to two
+    // exchanges out of three and publishes a consolidated book quietly missing
+    // a third of its liquidity - which looks like thin markets, not like a
+    // configuration error.
+    const MarketType market = instrument_key.Market();
+    for (const VenueId venue : enabled_venues) {
+        if (venues_config.Find(venue, market) == nullptr) {
+            Logger::Log(LogLevel::kError, "[Aggregator] {} has no endpoints for venue \"{}\" market \"{}\"",
+                        kVenuesConfigFileName, VenueConverter::ToVenueString(venue), ToMarketString(market));
+            return 2;
+        }
+    }
+
     // Venue registration - the in-process stand-in for the kHello handshake
     // (DESIGN.md §17.4). Core registers no venues from config: a venue exists
     // because a provider exists, so the wiring layer that creates the
@@ -209,11 +239,16 @@ int main(int argc, char* argv[]) {
     // whole bounded window - the venue's diff chain is broken and only the
     // provider can fix it, by resyncing. Ignoring it would leave Core applying
     // deltas to a book that has silently lost one.
-    auto make_update_sink = [&core](VenueSlot slot, VenueId venue) {
-        return [&core, slot, venue](BookUpdate&& update) {
+    auto make_update_sink = [&core, market](VenueSlot slot, VenueId venue) {
+        // Resolved once here at wiring time, the same way Provider caches
+        // venue_market_str_ - a view into a string LITERAL, so there is nothing
+        // to own and nothing to build on a path that only fires when the queue
+        // is already in trouble.
+        const std::string_view venue_market_str = VenueConverter::ToVenueMarketString(venue, market);
+        return [&core, slot, venue_market_str](BookUpdate&& update) {
             if (!core.EnqueueUpdate(slot, std::move(update))) {
                 Logger::Log(LogLevel::kError, "[{}] core queue full - depth update dropped, resync required",
-                            VenueConverter::ToVenueString(venue));
+                            venue_market_str);
                 // TODO: call provider->RequestResync() here. The provider owns
                 // resync (§4.2/§9) but is not reachable from this lambda yet -
                 // wiring it needs the provider to exist before its callbacks,
@@ -226,11 +261,12 @@ int main(int argc, char* argv[]) {
         // top-of-book snapshot, so the next one supersedes it whole.
         return [&core, slot](const BboQuote& quote) { core.EnqueueQuote(slot, quote); };
     };
-    auto make_health_sink = [&core](VenueSlot slot, VenueId venue) {
-        return [&core, slot, venue](const VenueHealthEvent& event) {
+    auto make_health_sink = [&core, market](VenueSlot slot, VenueId venue) {
+        const std::string_view venue_market_str = VenueConverter::ToVenueMarketString(venue, market);
+        return [&core, slot, venue_market_str](const VenueHealthEvent& event) {
             if (!core.EnqueueHealth(slot, event)) {
                 Logger::Log(LogLevel::kError, "[{}] core queue full - health event dropped, resync required",
-                            VenueConverter::ToVenueString(venue));
+                            venue_market_str);
             }
         };
     };
@@ -241,11 +277,19 @@ int main(int argc, char* argv[]) {
     std::vector<VenueSlot> provider_slots;
 
     if (venue_enabled(VenueId::BINANCE)) {
+        // Non-null: the loop above returned if any enabled venue lacked
+        // endpoints for this market.
+        const VenueEndpoints& endpoints = *venues_config.Find(VenueId::BINANCE, market);
         ProviderConfig binance_config = {
             .venue_id = VenueId::BINANCE,
             .instrument = instrument_key,
-            .host = std::string(kBinanceHost),
-            .port = std::string(kBinancePort),
+            .host = endpoints.ws_host,
+            .port = endpoints.ws_port,
+            .depth_path = endpoints.depth_path,
+            .bbo_path = endpoints.bbo_path,
+            .rest_host = endpoints.rest_host,
+            .rest_port = endpoints.rest_port,
+            .rest_depth_path = endpoints.rest_depth_path,
             .depth = ResolveDepth(VenueId::BINANCE, server_config.depth),
             // Same count for every venue. Per-venue tuning may eventually be
             // needed - OKX rate-limits connection ATTEMPTS more tightly than the
@@ -264,11 +308,14 @@ int main(int argc, char* argv[]) {
     }
 
     if (venue_enabled(VenueId::BYBIT)) {
+        const VenueEndpoints& endpoints = *venues_config.Find(VenueId::BYBIT, market);
         ProviderConfig bybit_config = {
             .venue_id = VenueId::BYBIT,
             .instrument = instrument_key,
-            .host = std::string(kBybitHost),
-            .port = std::string(kBybitPort),
+            .host = endpoints.ws_host,
+            .port = endpoints.ws_port,
+            .depth_path = endpoints.depth_path,
+            .bbo_path = endpoints.bbo_path,
             .depth = ResolveDepth(VenueId::BYBIT, server_config.depth),
             .connections = server_config.connections,
             .depth_backstop_ns = staleness::kBybitDepthBackstopNs,
@@ -283,11 +330,18 @@ int main(int argc, char* argv[]) {
     }
 
     if (venue_enabled(VenueId::OKX)) {
+        const VenueEndpoints& endpoints = *venues_config.Find(VenueId::OKX, market);
         ProviderConfig okx_config = {
             .venue_id = VenueId::OKX,
             .instrument = instrument_key,
-            .host = std::string(kOkxHost),
-            .port = std::string(kOkxPort),
+            .host = endpoints.ws_host,
+            .port = endpoints.ws_port,
+            .depth_path = endpoints.depth_path,
+            .bbo_path = endpoints.bbo_path,
+            // Futures only, and only to read the swap's contract size.
+            .rest_host = endpoints.rest_host,
+            .rest_port = endpoints.rest_port,
+            .rest_instruments_path = endpoints.rest_instruments_path,
             .depth = ResolveDepth(VenueId::OKX, server_config.depth),
             .connections = server_config.connections,
             // Derived from OKX's ~60s seqId == prevSeqId keepalive.

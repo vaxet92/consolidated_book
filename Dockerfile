@@ -90,4 +90,15 @@ COPY --from=builder /src/build/client/client_app ./
 # context (not the builder stage): it is data, not something compiled.
 COPY server_config.json ./
 
+# Venue endpoints - hosts, ports and WS/REST paths per (venue, market). Read by
+# the same fixed-name rule as server_config.json, so it must land at exactly
+# /app/venues_config.json.
+#
+# KEY: this file is REQUIRED, not optional. A missing one is a startup error
+# rather than a fall-back to built-in defaults, because there are no built-in
+# defaults any more - types/venue.h no longer carries the host constants. If
+# this COPY is ever dropped, the container fails immediately with
+# "venues_config: could not open ..." instead of connecting somewhere stale.
+COPY venues_config.json ./
+
 EXPOSE 50051

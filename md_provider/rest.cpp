@@ -1,4 +1,4 @@
-#include "binance_rest.h"
+#include "rest.h"
 #include "logger/logger.h"
 #include "root_certificates.hpp"
 

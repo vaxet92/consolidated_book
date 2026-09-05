@@ -2,6 +2,7 @@
 
 #include <array>
 #include <functional>
+#include <optional>
 #include <string_view>
 
 #include "md_core/consolidated_bbo.h"
@@ -15,6 +16,22 @@ namespace market_data {
 // does (proto3 enums must have a zero value). VENUE_UNSPECIFIED should never
 // actually be produced here - every VenueId case is handled explicitly.
 wire::Venue ToWire(VenueId venue);
+
+// Domain MarketType (types/venue.h) has no UNSPECIFIED value; wire::MarketType
+// does, for the same proto3 reason as Venue. Every domain value maps to a real
+// wire value, so this direction cannot fail.
+wire::MarketType ToWire(MarketType market);
+
+// The wire -> domain direction CAN fail, and that is exactly the point.
+// MARKET_UNSPECIFIED means the client named no market; an unknown positive
+// value means a newer client is talking to an older server. Neither of them
+// names a book we hold.
+//
+// KEY: nullopt rather than a defaulted MarketType - the same choice
+// ToMarketType(string_view) already makes for config. Spot and futures are
+// separate subscriptions, so quietly defaulting a confused client to spot
+// would hand it the wrong book with no way to notice.
+std::optional<MarketType> FromWire(wire::MarketType market);
 
 // Slot -> wire venue, resolved ONCE per published message rather than per
 // level (DESIGN.md §17.6).

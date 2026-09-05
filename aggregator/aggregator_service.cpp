@@ -29,16 +29,14 @@ const std::vector<uint32_t> kDefaultBpsBands = {500};  // 50, 100, 200, 500, 100
 // Fills the common header every Update carries regardless of payload, so a
 // client never needs state from an earlier message to interpret this one
 // (§7.4 - a state-publishing API, not an event log).
-// TODO(futures): the wire carries the SYMBOL but not the MARKET. A client
-// cannot yet tell a spot BTCUSDT update from a futures one - they arrive with
-// the same `symbol` string. Core keeps them in separate books correctly; the
-// proto needs a market_type field on SubscribeRequest and Update before
-// futures is usable end to end. See DESIGN.md futures step F5.
 void FillHeader(wire::Update& update, InstrumentKey instrument) {
     update.set_server_ts_ns(NowNs());
     // Symbol() only - ToInstrumentString(InstrumentKey) would emit
-    // "BTCUSDT:spot", which is a log format, not a wire symbol.
+    // "BTCUSDT:spot", which is a log format, not a wire symbol. The market
+    // travels in its own typed field below rather than glued into the symbol
+    // string, so a client parses an enum instead of splitting on ':'.
     update.set_symbol(VenueConverter::ToInstrumentString(instrument.Symbol()));
+    update.set_market(ToWire(instrument.Market()));
     update.set_price_scale(kScaleExponent);
     update.set_qty_scale(kScaleExponent);
 }
@@ -64,11 +62,23 @@ grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, cons
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown symbol: " + request->symbol());
     }
 
+    // Spot and futures are separate subscriptions, so the market is REQUIRED -
+    // it is half of the key that selects the book. FromWire returns nullopt for
+    // MARKET_UNSPECIFIED, which is what a client that omitted the field sends:
+    // a proto3 enum has no presence, so "forgot" and "chose zero" are the same
+    // bytes and cannot be told apart here. Rejecting is what makes that visible
+    // rather than silently serving spot.
+    const std::optional<MarketType> market = FromWire(request->market());
+    if (!market.has_value()) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "market must be SPOT or FUTURES");
+    }
+
     // Feeds are selected by PRESENCE (§8.4): bbo is a bool; the band feeds
     // are optional sub-messages whose presence means "subscribed" and whose
     // (possibly empty) array picks the thresholds.
     Subscription subscription;
     subscription.channel = std::make_shared<Channel>();
+    subscription.instrument = MakeKey(*instrument, *market);
     subscription.wants_bbo = request->bbo();
     subscription.wants_volume_bands = request->has_volume_bands();
     subscription.wants_price_bands = request->has_price_bands();
@@ -145,6 +155,13 @@ void AggregatorServiceImpl::PublishBbo(InstrumentKey instrument, const consolida
 
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     for (auto& [id, subscription] : sessions_) {
+        // Symbol AND market in one compare - see Subscription::instrument.
+        // Without this every session received every book, spot and futures
+        // alike, which is the mixing the whole InstrumentKey design prevents
+        // one layer down in Core.
+        if (subscription.instrument != instrument) {
+            continue;  // a different book
+        }
         if (!subscription.wants_bbo) {
             continue;  // subscribed to bands only
         }
@@ -178,6 +195,10 @@ void AggregatorServiceImpl::PublishBook(InstrumentKey instrument, std::shared_pt
     std::vector<consolidated::BpsFill> ask_bps;
 
     for (auto& [id, subscription] : sessions_) {
+        // Same filter as PublishBbo - symbol and market in one compare.
+        if (subscription.instrument != instrument) {
+            continue;  // a different book
+        }
         if (subscription.wants_volume_bands) {
             consolidated::FillToNotionalBands(book->bids, subscription.notional_bands, bid_fills);
             consolidated::FillToNotionalBands(book->asks, subscription.notional_bands, ask_fills);

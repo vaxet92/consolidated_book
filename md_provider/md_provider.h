@@ -14,15 +14,42 @@
 #include <memory>
 #include <chrono>
 #include <string>
+#include <string_view>
 #include <functional>
 
 namespace market_data {
 
 struct ProviderConfig {
     VenueId venue_id;
-    InstrumentKey instrument;  // spot only for now
-    std::string host;         // e.g. "stream.binance.com" - venue-specific, but data, not baked into the class
-    std::string port;         // e.g. "9443"
+    // Carries the market as well as the symbol, so the endpoints below and the
+    // book this provider feeds are guaranteed to describe the same market.
+    InstrumentKey instrument;
+    std::string host;  // WebSocket host, e.g. "stream.binance.com"
+    std::string port;  // e.g. "443"
+
+    // WebSocket path TEMPLATES, straight from venues_config.json. May contain
+    // the {symbol} placeholder; each provider resolves it in its constructor
+    // with its own spelling of the symbol - "btcusdt" for Binance,
+    // "BTC-USDT-SWAP" for OKX - because only the provider knows that spelling.
+    //
+    // KEY: the two are separate fields even though Bybit and OKX use one path
+    // for both streams. Binance does not: it connects to a per-stream URL
+    // (/ws/{symbol}@depth@100ms vs /ws/{symbol}@bookTicker), so collapsing
+    // these into one would make Binance the special case again - which is
+    // exactly what moving paths into config removed.
+    std::string depth_path;
+    std::string bbo_path;
+
+    // REST endpoints. Empty for a venue that needs no REST at all.
+    //
+    // The two paths are independent and no venue uses both: Binance needs
+    // rest_depth_path because its depth stream is differential and must be
+    // seeded (DESIGN_1 §4.3); OKX futures needs rest_instruments_path for a
+    // swap's contract size, and nothing else.
+    std::string rest_host;
+    std::string rest_port;
+    std::string rest_depth_path;
+    std::string rest_instruments_path;
 
     // Book depth for THIS venue, already resolved to one of its published
     // tiers by SelectDepthTier (config/config.h). Not the raw --depth value:
@@ -101,7 +128,24 @@ class Provider {
     // decision.
     virtual void OnDepthMessage(const std::string& message, uint32_t conn_index) = 0;
     virtual std::string DepthSubscriptionMessage() const = 0;
-    virtual const char* GetDepthPath() const = 0;
+
+    // Resolves {symbol} in both path templates and stores the results. Each
+    // subclass calls this from its own constructor with the symbol spelled the
+    // way its venue expects it.
+    //
+    // KEY: this cannot be done in the base constructor by calling a virtual
+    // "format the symbol" hook. During a base constructor the object is still
+    // only a Provider - the override does not exist yet, so the call would
+    // dispatch to the base version. Doing it in each subclass constructor,
+    // where the object IS that subclass, is what makes it correct.
+    void ResolveStreamPaths(std::string_view venue_symbol);
+
+    // Non-virtual. All three venues resolve a template from config now, so
+    // there is nothing left for a subclass to decide - this used to be two
+    // pure virtuals with six overrides, four of which just returned a global
+    // constant.
+    const char* GetDepthPath() const { return depth_path_.c_str(); }
+    const char* GetBboPath() const { return bbo_path_.c_str(); }
 
     // Host/port are config data now, not per-venue behavior - no subclass
     // needs to override these anymore.
@@ -115,7 +159,6 @@ class Provider {
     // are ~10ms, against 100ms-throttled depth.
     virtual void OnBboMessage(const std::string& message, uint32_t conn_index) = 0;
     virtual std::string BboSubscriptionMessage() const = 0;
-    virtual const char* GetBboPath() const = 0;
 
     // Duplicate rejection for redundant connections. True -> this is the
     // first copy, process it. False -> already seen, drop it.
@@ -258,14 +301,26 @@ class Provider {
 
     // Called on the worker thread just before (re)creating the sessions, so
     // a subclass can drop per-connection state - sync progress, sequence
-    // numbers, buffered events. Default: nothing.
+    // numbers, buffered events - and do any blocking setup a connection
+    // depends on. Default: nothing, succeed.
     //
     // Required for any venue whose stream does NOT re-send a snapshot on
     // reconnect (Binance): without it, stale sync state survives a resync
     // and the first event on the new connection looks like a continuity
     // violation, resyncing forever. Bybit/OKX self-heal via their
     // in-channel snapshot.
-    virtual void OnReconnect() {}
+    //
+    // Returns false to ABORT this connection attempt. The caller then goes
+    // through HandleReconnection(), so a transient failure backs off and
+    // retries while a persistent one eventually stops the provider for good -
+    // which is the behaviour a failed setup step wants, and is why this is a
+    // bool rather than the subclass calling Stop() itself.
+    //
+    // KEY: blocking here is SAFE, unlike almost anywhere else in a provider.
+    // This runs on the worker thread before ioc.restart() and before any
+    // session exists, so there is no read loop to stall - and nothing can
+    // arrive and be processed against half-initialised state.
+    virtual bool OnReconnect() { return true; }
 
     // Wall clock, in milliseconds. Feeds BookUpdate/BboQuote::recv_ts_ns,
     // which is compared against the venue's exch_ts_ns and goes on the wire.
@@ -282,6 +337,7 @@ class Provider {
     static int64_t GetMonotonicNs();
 
     const ProviderConfig config;
+    const std::string_view venue_market_str_;
     std::atomic<bool> running;
 
    private:
@@ -342,6 +398,13 @@ class Provider {
     struct SessionSlot {
         WebSocketSessionSSLPtr session;
     };
+
+    // Resolved once in the subclass constructor by ResolveStreamPaths(), then
+    // only read. GetDepthPath()/GetBboPath() hand out c_str() pointers that
+    // the session holds across a reconnect, so these must never be reassigned
+    // after construction - a reallocation would dangle them.
+    std::string depth_path_;
+    std::string bbo_path_;
 
     std::thread worker_thread;
     net::io_context ioc;
