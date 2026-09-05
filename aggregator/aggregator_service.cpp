@@ -26,6 +26,14 @@ const std::vector<uint64_t> kDefaultNotionalBands = {
     1 * kMillion};  // 1 * kMillion, 5 * kMillion, 10 * kMillion, 25 * kMillion, 50 * kMillion
 const std::vector<uint32_t> kDefaultBpsBands = {500};  // 50, 100, 200, 500, 1000
 
+// How long a session's handler thread may stay parked before it re-checks
+// whether its client is still there. NOT a latency figure: a published update
+// wakes the wait immediately (ConflatedChannel::Push). This only bounds how
+// long a DEAD session can linger, because the synchronous gRPC API gives no
+// way to be woken on cancellation - ServerContext offers no hook a condition
+// variable can wait on.
+constexpr auto kCancellationPollInterval = std::chrono::milliseconds(200);
+
 // Fills the common header every Update carries regardless of payload, so a
 // client never needs state from an earlier message to interpret this one
 // (§7.4 - a state-publishing API, not an event log).
@@ -133,10 +141,19 @@ grpc::Status AggregatorServiceImpl::Subscribe(grpc::ServerContext* context, cons
     Logger::Log(LogLevel::kInfo, "[Aggregator] session {} subscribed (symbol={}) {}", session_id, request->symbol(),
                 feeds);
 
+    // KEY: the timeout is what makes this loop exit at all when the client
+    // disappears during a quiet market. ClientContext::TryCancel() sets a flag
+    // inside gRPC; it cannot wake a thread parked on this channel's condition
+    // variable, so IsCancelled() is only ever observed here, at the top.
+    // Without the bounded wait, a client that disconnects with nothing pending
+    // leaks this thread and its session entry for the life of the process.
     while (!context->IsCancelled()) {
-        auto update = channel->WaitAndTake();
+        auto update = channel->WaitAndTake(kCancellationPollInterval);
         if (!update) {
-            break;  // channel closed
+            if (channel->IsClosed()) {
+                break;  // session torn down deliberately
+            }
+            continue;  // timed out - re-check cancellation at the top
         }
         if (!writer->Write(*update)) {
             break;  // client gone
